@@ -19,16 +19,25 @@ use rustfft::num_complex::Complex32;
 use rustfft::FftPlanner;
 
 /// Similarity transform applied to a frame: scale about the centre, then shift.
+///
+/// `pdx` / `pdy` carry the *depth-dependent* part of the shift; see [`Parallax`].
+/// Refocusing moves the entrance pupil and changes magnification, so the image of
+/// a scene point moves by an amount that depends on how far away it is. One
+/// similarity transform cannot register a near foreground and the background
+/// behind it at the same time, and the part it gets wrong is exactly the part the
+/// fusion then mixes into a ghost.
 #[derive(Clone, Copy, Debug)]
 pub struct Transform {
     pub scale: f32,
     pub dx: f32,
     pub dy: f32,
+    pub pdx: f32,
+    pub pdy: f32,
 }
 
 impl Default for Transform {
     fn default() -> Self {
-        Self { scale: 1.0, dx: 0.0, dy: 0.0 }
+        Self { scale: 1.0, dx: 0.0, dy: 0.0, pdx: 0.0, pdy: 0.0 }
     }
 }
 
@@ -38,6 +47,114 @@ impl Transform {
     #[inline]
     pub fn inverse_map(&self, x: f32, y: f32) -> (f32, f32) {
         ((x - self.dx) / self.scale, (y - self.dy) / self.scale)
+    }
+
+    /// Depth-dependent shift at nearness `u` (0 = farthest, 1 = nearest).
+    #[inline]
+    pub fn parallax_at(&self, u: f32) -> (f32, f32) {
+        (self.pdx * u, self.pdy * u)
+    }
+}
+
+/// Depth-dependent residual shift: the parallax a focus sweep drags along.
+///
+/// On the reference stack block matching finds that the feet need about ten
+/// pixels more shift than the face between the ends of the sweep, with the
+/// residual changing sign in between. Whatever is left over after the global
+/// similarity fit is therefore not noise: it is a systematic function of
+/// distance, and it is worst where the subject comes closest to the lens, which
+/// is also where the sharp frames of the sweep sit.
+///
+/// The residual is modelled as a shift proportional to a nearness parameter `u`
+/// (1 at `near`, 0 at `far`), sampled from the depth field so that the
+/// correction follows the scene. `d` holds that field at `scale` canvas pixels
+/// per sample, which keeps the extra cost at one bilinear lookup per pixel.
+#[derive(Clone)]
+pub struct Parallax {
+    /// Nearness per sample, already dilated towards the foreground and smoothed.
+    pub u: Vec<f32>,
+    pub w: usize,
+    pub h: usize,
+    pub scale: f32,
+}
+
+impl Parallax {
+    /// Build the nearness field from a depth field (frame numbers).
+    ///
+    /// Two details matter here and both were learned the hard way. First the
+    /// nearness is **dilated towards the foreground** before it is used: at an
+    /// occlusion boundary the depth field legitimately jumps from the near
+    /// surface to whatever is behind it, but the pixels *on* the boundary carry
+    /// the near surface's content, and giving them the background's shift tears
+    /// the edge apart — measured as a serrated sawtooth along the base rim, 6
+    /// levels of difference against the previous version. Taking the nearest
+    /// depth within a small radius is what a visible-surface map means.
+    ///
+    /// Then it is smoothed, because the shift has to vary at most sub-pixel per
+    /// pixel or the resampling turns the residual steps of the depth field into
+    /// visible geometry.
+    pub fn new(depth: &[f32], w: usize, h: usize, scale: f32, near: f32, far: f32, dilate: usize) -> Self {
+        let span = (far - near).max(1e-6);
+        let mut u: Vec<f32> = depth
+            .iter()
+            .map(|d| ((far - d) / span).clamp(0.0, 1.0))
+            .collect();
+        if dilate > 0 {
+            // Separable max filter: foreground wins.
+            let mut tmp = vec![0.0f32; w * h];
+            for y in 0..h {
+                for x in 0..w {
+                    let x0 = x.saturating_sub(dilate);
+                    let x1 = (x + dilate).min(w - 1);
+                    let mut m = 0.0f32;
+                    for k in x0..=x1 {
+                        let v = u[y * w + k];
+                        if v > m {
+                            m = v;
+                        }
+                    }
+                    tmp[y * w + x] = m;
+                }
+            }
+            for y in 0..h {
+                let y0 = y.saturating_sub(dilate);
+                let y1 = (y + dilate).min(h - 1);
+                for x in 0..w {
+                    let mut m = 0.0f32;
+                    for k in y0..=y1 {
+                        let v = tmp[k * w + x];
+                        if v > m {
+                            m = v;
+                        }
+                    }
+                    u[y * w + x] = m;
+                }
+            }
+        }
+        let plane = Plane { w, h, d: u };
+        let plane = box_blur(&plane, 1);
+        Parallax { u: plane.d, w, h, scale }
+    }
+
+    /// Nearness at a canvas position, bilinear.
+    #[inline]
+    pub fn u_at(&self, canvas_x: f32, canvas_y: f32) -> f32 {
+        let x = canvas_x / self.scale - 0.5;
+        let y = canvas_y / self.scale - 0.5;
+        let x0 = x.floor();
+        let y0 = y.floor();
+        let fx = x - x0;
+        let fy = y - y0;
+        let (w, h) = (self.w as i64, self.h as i64);
+        let g = |xi: f32, yi: f32| -> f32 {
+            let xi = (xi as i64).clamp(0, w - 1) as usize;
+            let yi = (yi as i64).clamp(0, h - 1) as usize;
+            self.u[yi * self.w + xi]
+        };
+        g(x0, y0) * (1.0 - fx) * (1.0 - fy)
+            + g(x0 + 1.0, y0) * fx * (1.0 - fy)
+            + g(x0, y0 + 1.0) * (1.0 - fx) * fy
+            + g(x0 + 1.0, y0 + 1.0) * fx * fy
     }
 }
 
@@ -75,13 +192,35 @@ pub fn warp_region(
     off_y: f32,
     fill: f32,
 ) -> Plane {
+    warp_region_par(src, t, tw, th, off_x, off_y, fill, None)
+}
+
+/// [`warp_region`] with the depth-dependent shift applied. `par` is sampled in
+/// canvas coordinates, which is what the caller passes as `off_x` / `off_y`.
+pub fn warp_region_par(
+    src: &Plane,
+    t: &Transform,
+    tw: usize,
+    th: usize,
+    off_x: f32,
+    off_y: f32,
+    fill: f32,
+    par: Option<&Parallax>,
+) -> Plane {
     let cx = src.w as f32 * 0.5;
     let cy = src.h as f32 * 0.5;
     let mut out = vec![fill; tw * th];
     out.par_chunks_mut(tw).enumerate().for_each(|(y, row)| {
         for x in 0..tw {
             let (sx, sy) = (x as f32 + 0.5 + off_x, y as f32 + 0.5 + off_y);
-            let (rx, ry) = t.inverse_map(sx - cx, sy - cy);
+            // Sample where the scene point that lands on this canvas pixel
+            // actually is in this frame: the global transform plus the
+            // distance-dependent residual.
+            let (px, py) = match par {
+                Some(p) => t.parallax_at(p.u_at(sx, sy)),
+                None => (0.0, 0.0),
+            };
+            let (rx, ry) = t.inverse_map(sx - cx + px, sy - cy + py);
             // Continuous coordinate -> pixel index (pixel i is centred at i+0.5).
             let ix = rx + cx - 0.5;
             let iy = ry + cy - 0.5;
@@ -96,6 +235,7 @@ pub fn warp_region(
 }
 
 /// Same as [`warp_region`] but for an interleaved multi-channel grid.
+#[allow(dead_code)]
 pub fn warp_grid_region(
     src: &Grid,
     t: &Transform,
@@ -105,6 +245,20 @@ pub fn warp_grid_region(
     off_y: f32,
     fill: f32,
 ) -> Grid {
+    warp_grid_region_par(src, t, tw, th, off_x, off_y, fill, None)
+}
+
+/// [`warp_grid_region`] with the depth-dependent shift applied.
+pub fn warp_grid_region_par(
+    src: &Grid,
+    t: &Transform,
+    tw: usize,
+    th: usize,
+    off_x: f32,
+    off_y: f32,
+    fill: f32,
+    par: Option<&Parallax>,
+) -> Grid {
     let c = src.c;
     let cx = src.w as f32 * 0.5;
     let cy = src.h as f32 * 0.5;
@@ -112,7 +266,11 @@ pub fn warp_grid_region(
     out.par_chunks_mut(tw * c).enumerate().for_each(|(y, row)| {
         for x in 0..tw {
             let (sx, sy) = (x as f32 + 0.5 + off_x, y as f32 + 0.5 + off_y);
-            let (rx, ry) = t.inverse_map(sx - cx, sy - cy);
+            let (px, py) = match par {
+                Some(p) => t.parallax_at(p.u_at(sx, sy)),
+                None => (0.0, 0.0),
+            };
+            let (rx, ry) = t.inverse_map(sx - cx + px, sy - cy + py);
             let ix = rx + cx - 0.5;
             let iy = ry + cy - 0.5;
             let dp = x * c;
@@ -151,6 +309,440 @@ pub fn warp_grid_region(
         }
     });
     Grid { w: tw, h: th, c, d: out }
+}
+
+/// Options for the depth-dependent residual estimation.
+#[derive(Clone, Copy, Debug)]
+pub struct ParallaxOptions {
+    /// Half-range of the shift search, in analysis-scale pixels.
+    pub search: usize,
+    /// Blocks per axis used to sample the residual field.
+    pub blocks: usize,
+}
+
+impl Default for ParallaxOptions {
+    fn default() -> Self {
+        Self { search: 24, blocks: 10 }
+    }
+}
+
+/// Residual shift as a function of nearness, measured by block matching.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ParallaxFit {
+    /// Shift the model asks for at nearness 0 (the far end).
+    pub dx_far: f32,
+    pub dy_far: f32,
+    /// Shift the model asks for at nearness 1 (the near end).
+    pub dx_near: f32,
+    pub dy_near: f32,
+    /// 0..1: mean correlation of the blocks the fit rests on, times how many of
+    /// the sampled blocks survived.
+    pub quality: f32,
+    pub blocks: usize,
+    /// Spread of the nearness values the fit rests on. A small spread means the
+    /// slope is extrapolation, and the caller should not trust it.
+    #[allow(dead_code)]
+    pub u_spread: f32,
+}
+
+/// Normalised cross-correlation of two equal-length patches.
+#[inline]
+fn ncc(pa: &[f32], pb: &[f32]) -> f32 {
+    let n = pa.len() as f32;
+    let ma = pa.iter().sum::<f32>() / n;
+    let mb = pb.iter().sum::<f32>() / n;
+    let mut num = 0.0f32;
+    let mut va = 0.0f32;
+    let mut vb = 0.0f32;
+    for i in 0..pa.len() {
+        let a = pa[i] - ma;
+        let b = pb[i] - mb;
+        num += a * b;
+        va += a * a;
+        vb += b * b;
+    }
+    num / (va * vb).sqrt().max(1e-9)
+}
+
+/// Copy a patch, subsampled by `step`.
+fn patch(src: &Plane, x0: usize, y0: usize, bw: usize, bh: usize, step: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity((bw / step + 1) * (bh / step + 1));
+    let mut y = 0;
+    while y < bh {
+        let mut x = 0;
+        while x < bw {
+            out.push(src.d[(y0 + y) * src.w + x0 + x]);
+            x += step;
+        }
+        y += step;
+    }
+    out
+}
+
+/// Mean gradient magnitude of a patch: blocks with nothing to register on are
+/// dropped rather than allowed to vote.
+fn patch_texture(src: &Plane, x0: usize, y0: usize, bw: usize, bh: usize, step: usize) -> f32 {
+    let mut acc = 0.0f32;
+    let mut n = 0.0f32;
+    let mut y = 1;
+    while y + 1 < bh {
+        let mut x = 1;
+        while x + 1 < bw {
+            let i = (y0 + y) * src.w + x0 + x;
+            let gx = src.d[i + 1] - src.d[i - 1];
+            let gy = src.d[i + src.w] - src.d[i - src.w];
+            acc += (gx * gx + gy * gy).sqrt();
+            n += 1.0;
+            x += step;
+        }
+        y += step;
+    }
+    if n > 0.0 {
+        acc / n
+    } else {
+        0.0
+    }
+}
+
+/// The shift of `b` that best matches the patch of `a` at (x0, y0).
+///
+/// Hierarchical: quarter scale carries the bulk of the search range, half scale
+/// and then full scale settle the last pixels. Returns the correlation of the
+/// winning position so the caller can weight or reject the sample.
+fn block_shift(
+    a: &Plane,
+    b: &Plane,
+    a2: &Plane,
+    b2: &Plane,
+    a4: &Plane,
+    b4: &Plane,
+    x0: usize,
+    y0: usize,
+    bw: usize,
+    bh: usize,
+    rng: usize,
+) -> (i32, i32, f32) {
+    let r4 = ((rng + 3) / 4) as i32;
+    let w4 = (bw / 4).max(4);
+    let h4 = (bh / 4).max(4);
+    let pa4 = patch(a4, x0 / 4, y0 / 4, w4, h4, 2);
+    let mut best = (-9.0f32, 0i32, 0i32);
+    for dy in -r4..=r4 {
+        for dx in -r4..=r4 {
+            let xx = x0 as i32 / 4 + dx;
+            let yy = y0 as i32 / 4 + dy;
+            if xx < 0 || yy < 0 || xx as usize + w4 >= a4.w || yy as usize + h4 >= a4.h {
+                continue;
+            }
+            let c = ncc(&pa4, &patch(b4, xx as usize, yy as usize, w4, h4, 2));
+            if c > best.0 {
+                best = (c, dx, dy);
+            }
+        }
+    }
+    best.1 *= 4;
+    best.2 *= 4;
+    for step in [2usize, 1usize] {
+        let (ac, bc) = if step == 2 { (a2, b2) } else { (a, b) };
+        let w = (bw / step).max(4);
+        let h = (bh / step).max(4);
+        let bx = x0 as i32 / step as i32 + best.1 / step as i32;
+        let by = y0 as i32 / step as i32 + best.2 / step as i32;
+        let pa = patch(ac, bx as usize, by as usize, w, h, 1);
+        let r = if step == 2 { 3 } else { 2 };
+        let mut bst = (best.0, bx, by);
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let xx = bx + dx;
+                let yy = by + dy;
+                if xx < 0 || yy < 0 || xx as usize + w >= ac.w || yy as usize + h >= ac.h {
+                    continue;
+                }
+                let c = ncc(&pa, &patch(bc, xx as usize, yy as usize, w, h, 1));
+                if c > bst.0 {
+                    bst = (c, xx, yy);
+                }
+            }
+        }
+        best.0 = bst.0;
+        best.1 = (bst.1 - x0 as i32 / step as i32) * step as i32;
+        best.2 = (bst.2 - y0 as i32 / step as i32) * step as i32;
+    }
+    (best.1, best.2, best.0)
+}
+
+/// Weighted least squares of value against nearness, with correlation weights.
+/// Returns (intercept_x, slope_x, intercept_y, slope_y).
+fn weighted_line(pts: &[(f32, f32, f32, f32)]) -> (f32, f32, f32, f32) {
+    let mut sw = 0.0f32;
+    let mut su = 0.0f32;
+    for p in pts {
+        let w = p.3.max(0.0).powi(2);
+        sw += w;
+        su += w * p.0;
+    }
+    let mu = su / sw.max(1e-9);
+    let mut svv = 0.0f32;
+    let mut svx = 0.0f32;
+    let mut svy = 0.0f32;
+    let mut sx = 0.0f32;
+    let mut sy = 0.0f32;
+    for p in pts {
+        let w = p.3.max(0.0).powi(2);
+        let v = p.0 - mu;
+        svv += w * v * v;
+        svx += w * v * p.1;
+        svy += w * v * p.2;
+        sx += w * p.1;
+        sy += w * p.2;
+    }
+    let svv = svv.max(1e-9);
+    let slope_x = svx / svv;
+    let slope_y = svy / svv;
+    let mean_x = sx / sw.max(1e-9);
+    let mean_y = sy / sw.max(1e-9);
+    (mean_x - slope_x * mu, slope_x, mean_y - slope_y * mu, slope_y)
+}
+
+/// How far the frame's image moves between the far and the near end of the
+/// stack, as a function of nearness `u`.
+///
+/// `reference` and `frame` must both already be warped onto the canvas with the
+/// global transform, and `depth` must be the canvas depth field at the same
+/// scale. Both images are low-passed first: what differs between them is defocus,
+/// and a blurred edge is still an edge in the same place, so blurring costs the
+/// registration nothing and removes the temptation to match focus instead of
+/// position.
+pub fn estimate_parallax(
+    reference: &Plane,
+    frame: &Plane,
+    depth: &Plane,
+    near: f32,
+    far: f32,
+    opts: &ParallaxOptions,
+) -> ParallaxFit {
+    const BLK: usize = 96;
+    let (w, h) = (reference.w.min(frame.w), reference.h.min(frame.h));
+    let a = box_blur(reference, 2);
+    let b = box_blur(frame, 2);
+    let (a2, b2) = (resize(&a, w / 2, h / 2), resize(&b, w / 2, h / 2));
+    let (a4, b4) = (resize(&a2, w / 4, h / 4), resize(&b2, w / 4, h / 4));
+    let nb = opts.blocks.max(2);
+    let step = (h / nb).max(BLK);
+
+    let blk = BLK.min(w / 2).min(h / 2);
+    if blk < 16 {
+        return ParallaxFit::default();
+    }
+    let mut samples: Vec<(f32, f32, f32, f32, f32)> = Vec::new();
+    let mut y0 = step / 2;
+    while y0 + blk < h {
+        let mut x0 = step / 2;
+        while x0 + blk < w {
+            // The block has to be dominated by one surface, otherwise its
+            // nearness does not describe the content it matched.
+            let mut ds: Vec<f32> = Vec::new();
+            let mut y = 0;
+            while y < blk {
+                let mut x = 0;
+                while x < blk {
+                    let yy = (y0 + y).min(depth.h - 1);
+                    let xx = (x0 + x).min(depth.w - 1);
+                    ds.push(depth.d[yy * depth.w + xx]);
+                    x += 8;
+                }
+                y += 8;
+            }
+            ds.sort_by(|p, q| p.partial_cmp(q).unwrap_or(std::cmp::Ordering::Equal));
+            let med = ds[ds.len() / 2];
+            let spread = ds[ds.len() * 9 / 10] - ds[ds.len() / 10];
+            let tex = patch_texture(&a, x0, y0, blk, blk, 2);
+            if tex > 0.0 && spread < 8.0 {
+                let (dx, dy, c) =
+                    block_shift(&a, &b, &a2, &b2, &a4, &b4, x0, y0, blk, blk, opts.search);
+                if c > 0.25 {
+                    let u = if far > near {
+                        ((far - med) / (far - near)).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    samples.push((u, dx as f32, dy as f32, c, tex));
+                }
+            }
+            x0 += step;
+        }
+        y0 += step;
+    }
+    if samples.len() < 6 {
+        return ParallaxFit::default();
+    }
+    // Keep the more textured half: a block sitting on flat paint matches
+    // anything and would drag the line.
+    let mut texs: Vec<f32> = samples.iter().map(|s| s.4).collect();
+    texs.sort_by(|p, q| p.partial_cmp(q).unwrap_or(std::cmp::Ordering::Equal));
+    let tex_min = texs[texs.len() / 2];
+    let mut pts: Vec<(f32, f32, f32, f32)> = samples
+        .iter()
+        .filter(|s| s.4 >= tex_min)
+        .map(|s| (s.0, s.1, s.2, s.3))
+        .collect();
+    if pts.len() < 6 {
+        return ParallaxFit::default();
+    }
+    let mut fit = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for round in 0..3 {
+        fit = weighted_line(&pts);
+        if round == 2 {
+            break;
+        }
+        let before = pts.len();
+        pts.retain(|p| {
+            let rx = p.1 - (fit.0 + fit.1 * p.0);
+            let ry = p.2 - (fit.2 + fit.3 * p.0);
+            (rx * rx + ry * ry).sqrt() < 2.0
+        });
+        if pts.len() < 6 {
+            return ParallaxFit::default();
+        }
+        if pts.len() == before {
+            break;
+        }
+    }
+    let mut us: Vec<f32> = pts.iter().map(|p| p.0).collect();
+    us.sort_by(|p, q| p.partial_cmp(q).unwrap_or(std::cmp::Ordering::Equal));
+    let u_spread = us[us.len() - 1] - us[0];
+    if u_spread < 0.25 {
+        return ParallaxFit::default();
+    }
+    let mean_c = pts.iter().map(|p| p.3).sum::<f32>() / pts.len() as f32;
+    ParallaxFit {
+        dx_far: fit.0,
+        dy_far: fit.2,
+        dx_near: fit.0 + fit.1,
+        dy_near: fit.2 + fit.3,
+        quality: mean_c * pts.len() as f32 / (pts.len() + 4) as f32,
+        blocks: pts.len(),
+        u_spread,
+    }
+}
+
+
+/// Smooth the per-frame fits across the stack.
+///
+/// The parallax is a property of the lens, so as the focus setting walks from
+/// one end of the sweep to the other it has to vary *smoothly*. Fitting each
+/// frame on its own does not give that: neighbouring frames come out with
+/// residuals that differ by more than the residual itself, and then correcting
+/// each frame by its own noisy estimate makes the frames the fusion *mixes*
+/// disagree more than before — measured as a sawtooth along the high-contrast
+/// rim of the base, and as an increase of 1.9 in the high-frequency energy of
+/// that patch, which is the opposite of what a registration fix should do.
+///
+/// So the individual measurements are treated as samples of a smooth curve: a
+/// weighted quadratic in the frame index is fitted through all of them, and the
+/// curve is evaluated per frame. Frames whose measurement failed simply do not
+/// contribute. The curve is then shifted so that it is exactly zero at the
+/// reference frame, which is what defines the canvas and therefore must not move.
+pub fn smooth_fits(fits: &[ParallaxFit], reference: usize) -> Vec<ParallaxFit> {
+    let n = fits.len();
+    if n < 4 {
+        return fits.to_vec();
+    }
+    let x = |k: usize| (k as f32 - reference as f32) / (n as f32 * 0.5);
+    // Basis: 1, x, x^2. Weighted normal equations per output channel.
+    let mut ata = [[0.0f64; 3]; 3];
+    let mut atb = [[0.0f64; 4]; 3];
+    for (k, f) in fits.iter().enumerate() {
+        if f.blocks < 6 {
+            continue;
+        }
+        let w = (f.quality as f64).max(1e-3);
+        let v = [1.0f64, x(k) as f64, (x(k) * x(k)) as f64];
+        for i in 0..3 {
+            for j in 0..3 {
+                ata[i][j] += w * v[i] * v[j];
+            }
+            atb[i][0] += w * v[i] * f.dx_far as f64;
+            atb[i][1] += w * v[i] * f.dy_far as f64;
+            atb[i][2] += w * v[i] * f.dx_near as f64;
+            atb[i][3] += w * v[i] * f.dy_near as f64;
+        }
+    }
+    let coef = solve3(&ata, &atb);
+    let Some(coef) = coef else {
+        return fits.to_vec();
+    };
+    let eval = |k: usize, ch: usize| -> f32 {
+        let v = [1.0f64, x(k) as f64, (x(k) * x(k)) as f64];
+        (v[0] * coef[0][ch] + v[1] * coef[1][ch] + v[2] * coef[2][ch]) as f32
+    };
+    let base = [eval(reference, 0), eval(reference, 1), eval(reference, 2), eval(reference, 3)];
+    (0..n)
+        .map(|k| {
+            let f = fits[k];
+            if f.blocks < 6 {
+                // A frame that could not be measured gets the curve, which is
+                // exactly what the curve is for.
+                return ParallaxFit {
+                    dx_far: eval(k, 0) - base[0],
+                    dy_far: eval(k, 1) - base[1],
+                    dx_near: eval(k, 2) - base[2],
+                    dy_near: eval(k, 3) - base[3],
+                    quality: 0.5,
+                    blocks: 0,
+                    u_spread: 0.0,
+                };
+            }
+            ParallaxFit {
+                dx_far: eval(k, 0) - base[0],
+                dy_far: eval(k, 1) - base[1],
+                dx_near: eval(k, 2) - base[2],
+                dy_near: eval(k, 3) - base[3],
+                ..f
+            }
+        })
+        .collect()
+}
+
+/// Solve a 3x3 system with 4 right-hand sides by Gaussian elimination.
+fn solve3(a: &[[f64; 3]; 3], b: &[[f64; 4]; 3]) -> Option<[[f64; 4]; 3]> {
+    let mut m = [[0.0f64; 7]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            m[i][j] = a[i][j];
+        }
+        for j in 0..4 {
+            m[i][3 + j] = b[i][j];
+        }
+    }
+    for col in 0..3 {
+        let mut piv = col;
+        for r in col..3 {
+            if m[r][col].abs() > m[piv][col].abs() {
+                piv = r;
+            }
+        }
+        if m[piv][col].abs() < 1e-12 {
+            return None;
+        }
+        m.swap(col, piv);
+        let d = m[col][col];
+        for j in 0..7 {
+            m[col][j] /= d;
+        }
+        for r in 0..3 {
+            if r == col {
+                continue;
+            }
+            let f = m[r][col];
+            for j in 0..7 {
+                m[r][j] -= f * m[col][j];
+            }
+        }
+    }
+    Some([[m[0][3], m[0][4], m[0][5], m[0][6]],
+          [m[1][3], m[1][4], m[1][5], m[1][6]],
+          [m[2][3], m[2][4], m[2][5], m[2][6]]])
 }
 
 /// Convenience wrapper: full-canvas warp using [`warp_region`].
@@ -452,7 +1044,7 @@ impl Aligner {
         let mut consider = |s: f32, best: &mut (Transform, f32)| {
             let (score, dx, dy) = self.score_scale(&small, s, &mut planner);
             if score.is_finite() && score > best.1 {
-                *best = (Transform { scale: s, dx: dx * kx, dy: dy * ky }, score);
+                *best = (Transform { scale: s, dx: dx * kx, dy: dy * ky, ..Default::default() }, score);
             }
         };
         let steps = self.opts.scale_steps.max(1);

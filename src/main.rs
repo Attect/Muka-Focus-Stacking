@@ -85,6 +85,28 @@ struct Cli {
     #[arg(long, default_value_t = 16)]
     bracket_radius: usize,
 
+    /// Half-range, in full-resolution pixels, of the search for the
+    /// depth-dependent residual shift; 0 (the default) turns it off.
+    ///
+    /// Refocusing moves the entrance pupil and changes magnification, so the
+    /// image of a scene point moves by an amount that depends on how far away it
+    /// is, and one similarity transform cannot satisfy every distance at once.
+    /// That the effect exists is easy to see on the raw frames: between the ends
+    /// of the sweep the feet need about 10 px more shift than the face. Almost
+    /// all of it, though, is the global magnification change that the alignment
+    /// above already removes. Measured *after* it, the depth-dependent part is
+    /// only 1-2 px, and correcting it moves the fine detail the fusion holds by
+    /// less than the run-to-run noise (bottom band keeps 0.985 of the per-frame
+    /// best either way). It is therefore off by default, and worth trying when
+    /// the residual really is large: high magnification, or a lens whose pupil
+    /// travels a long way between the near and the far end.
+    #[arg(long, default_value_t = 0)]
+    parallax: usize,
+
+    /// Blocks per axis used to sample the residual shift field.
+    #[arg(long, default_value_t = 16)]
+    parallax_blocks: usize,
+
     /// Candidate-window radius used for the coarsest detail levels. The wide
     /// window exists to rescue fine detail whose depth was misread; at the
     /// coarsest detail scales it does the opposite, because that is where a
@@ -817,7 +839,7 @@ fn main() -> Result<()> {
     // ---------------------------------------------------------------- stage 2
     let t = Instant::now();
     let mid = cache.frames.len() / 2;
-    let transforms_full: Vec<Transform> = if args.no_align {
+    let mut transforms_full: Vec<Transform> = if args.no_align {
         vec![Transform::default(); files.len()]
     } else {
         let opts = AlignOptions {
@@ -856,6 +878,7 @@ fn main() -> Result<()> {
                 scale: tr.scale,
                 dx: tr.dx * factor as f32,
                 dy: tr.dy * factor as f32,
+                ..Default::default()
             })
             .collect()
     };
@@ -891,7 +914,7 @@ fn main() -> Result<()> {
     };
     let transforms_cache: Vec<Transform> = transforms_full
         .iter()
-        .map(|t| Transform { scale: t.scale, dx: t.dx / factor as f32, dy: t.dy / factor as f32 })
+        .map(|t| Transform { scale: t.scale, dx: t.dx / factor as f32, dy: t.dy / factor as f32, ..Default::default() })
         .collect();
 
     // Window sizes are given in full-resolution pixels so that changing the
@@ -919,7 +942,7 @@ fn main() -> Result<()> {
         let (cw, ch) = ((aw + cs - 1) / cs, (ah + cs - 1) / cs);
         let tr_c: Vec<Transform> = transforms_cache
             .iter()
-            .map(|t| Transform { scale: t.scale, dx: t.dx / cs as f32, dy: t.dy / cs as f32 })
+            .map(|t| Transform { scale: t.scale, dx: t.dx / cs as f32, dy: t.dy / cs as f32, ..Default::default() })
             .collect();
         let mut cb = DepthBuilder::new(cw, ch, files.len());
         for k in 0..files.len() {
@@ -1384,6 +1407,83 @@ fn main() -> Result<()> {
         t.elapsed().as_secs_f32()
     ));
 
+    // ------------------------------------------- depth-dependent registration
+    //
+    // Everything up to here registered the frames with one similarity transform
+    // each, which by construction satisfies a single distance. Refocusing also
+    // moves the entrance pupil and changes magnification, so the image of a scene
+    // point moves by an amount that depends on how far away the point is, and
+    // what is left over after the global fit is not noise but a systematic
+    // function of depth. On the reference stack the near foreground needs about
+    // 10 px more shift than the face, and the frames that carry the foreground
+    // sharply are exactly the ones that are furthest out of register there — so
+    // the fusion, which mixes neighbouring frames, mixes misregistered content
+    // and the eye reads the result as soft.
+    //
+    // Measure that residual against the depth field and let every warp follow it.
+    let parallax: Option<align::Parallax> = if args.parallax > 0 {
+        let tp = Instant::now();
+        let mut ds: Vec<f32> = dfield.d.clone();
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let near = ds[((ds.len() as f32 - 1.0) * 0.02) as usize];
+        let far = ds[((ds.len() as f32 - 1.0) * 0.98) as usize];
+        let popts = align::ParallaxOptions {
+            search: (args.parallax / factor).max(4),
+            blocks: args.parallax_blocks.max(2),
+        };
+        let reference = align::warp(&cache.plane(mid), &transforms_cache[mid], aw, ah, 0.0);
+        let mut fits: Vec<align::ParallaxFit> = Vec::with_capacity(files.len());
+        let mut worst = 0.0f32;
+        let mut qsum = 0.0f32;
+        let mut used = 0;
+        for k in 0..files.len() {
+            let wg = align::warp(&cache.plane(k), &transforms_cache[k], aw, ah, 0.0);
+            let f = align::estimate_parallax(&reference, &wg, &dfield, near, far, &popts);
+            worst = worst.max(f.dx_near.abs().max(f.dy_near.abs()));
+            if f.blocks > 0 {
+                qsum += f.quality;
+                used += 1;
+            }
+            fits.push(f);
+        }
+        let raw = fits.clone();
+        fits = align::smooth_fits(&fits, mid);
+        for (k, f) in fits.iter().enumerate() {
+            transforms_full[k].dx += f.dx_far * factor as f32;
+            transforms_full[k].dy += f.dy_far * factor as f32;
+            transforms_full[k].pdx = (f.dx_near - f.dx_far) * factor as f32;
+            transforms_full[k].pdy = (f.dy_near - f.dy_far) * factor as f32;
+        }
+        for k in (0..files.len()).step_by((files.len() / 8).max(1)) {
+            let (f, r) = (fits[k], raw[k]);
+            say(&format!(
+                "  frame {:>2}: far ({:+.1},{:+.1})  near ({:+.1},{:+.1})   raw far ({:+.1},{:+.1}) near ({:+.1},{:+.1}) blocks {:>2} q {:.2}",
+                k, f.dx_far, f.dy_far, f.dx_near, f.dy_near,
+                r.dx_far, r.dy_far, r.dx_near, r.dy_near, r.blocks, r.quality
+            ));
+        }
+        say(&format!(
+            "  parallax: max |shift| {:.1} px at analysis scale, {}/{} frames fitted (mean quality {:.2}) in {:.1}s",
+            worst,
+            used,
+            files.len(),
+            qsum / used.max(1) as f32,
+            tp.elapsed().as_secs_f32()
+        ));
+        let dilate = (3 / factor).max(1);
+        Some(align::Parallax::new(
+            &dfield.d,
+            aw,
+            ah,
+            factor as f32,
+            near,
+            far,
+            dilate,
+        ))
+    } else {
+        None
+    };
+
     // ---------------------------------------------------------------- stage 4
     let t = Instant::now();
 
@@ -1464,6 +1564,7 @@ fn main() -> Result<()> {
         bracket_strength: args.bracket_strength,
         bracket_radius: args.bracket_radius,
         bracket_radius_coarse: args.bracket_radius_coarse,
+        parallax: parallax.clone(),
         coarse_levels: args.coarse_levels,
         denoise: args.denoise,
         base_winner: args.base_winner.clamp(0.0, 1.0),

@@ -16,7 +16,7 @@
 //! * `hard` — take a single frame per pixel. Fastest, useful for checking what
 //!   the depth map decided.
 
-use crate::align::{warp_grid_region, Transform};
+use crate::align::{warp_grid_region_par, Parallax, Transform};
 use crate::pyramid::{collapse, gaussian_pyramid, Grid};
 use crate::util::{Plane, RgbImage};
 use rayon::prelude::*;
@@ -119,6 +119,8 @@ pub struct FuseOptions {
     /// How many of the coarsest detail levels use `bracket_radius_coarse` instead
     /// of `bracket_radius`.
     pub coarse_levels: usize,
+    /// Depth-dependent registration, sampled per pixel. See [`Parallax`].
+    pub parallax: Option<Parallax>,
     /// Soft-threshold strength applied to the fused detail bands, in units of
     /// the estimated per-band noise sigma. 0 disables denoising.
     pub denoise: f32,
@@ -284,7 +286,7 @@ pub fn fuse(
         let mut rgb = source.load(k)?;
         apply_offset(&mut rgb, &opts.offsets[k]);
         let g = Grid { w: rgb.w, h: rgb.h, c: 3, d: rgb.d };
-        Ok(warp_grid_region(
+        Ok(warp_grid_region_par(
             &g,
             &transforms[k],
             ow,
@@ -292,6 +294,7 @@ pub fn fuse(
             opts.rect.x as f32,
             opts.rect.y as f32,
             0.0,
+            opts.parallax.as_ref(),
         ))
     };
 
