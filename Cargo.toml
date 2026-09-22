@@ -10,7 +10,7 @@ keywords = ["focus-stacking", "focus-bracketing", "photography", "macro", "image
 categories = ["multimedia::images", "command-line-utilities"]
 
 [[bin]]
-name = "muka"
+name = "mukastack"
 path = "src/main.rs"
 
 [dependencies]

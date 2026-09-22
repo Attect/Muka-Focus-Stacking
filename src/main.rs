@@ -1,4 +1,4 @@
-//! Muka-Focus-Stacking (command: `muka`) — merge a focus-bracketed photo
+//! Muka-Focus-Stacking (command: `mukastack`) — merge a focus-bracketed photo
 //! sequence into one all-in-focus image.
 //!
 //! Pipeline
@@ -39,7 +39,7 @@ use util::{Plane, RgbImage};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "muka",
+    name = "mukastack",
     about = "Merge a focus-bracketed sequence into a single all-in-focus image",
     version
 )]
@@ -800,7 +800,7 @@ fn main() -> Result<()> {
     if files.len() < 2 {
         bail!("need at least two frames, got {}", files.len());
     }
-    say(&format!("muka: {} frames", files.len()));
+    say(&format!("mukastack: {} frames", files.len()));
 
     // ---------------------------------------------------------------- stage 1
     let t = Instant::now();

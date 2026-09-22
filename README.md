@@ -1,6 +1,6 @@
 # Muka-Focus-Stacking
 
-> 命令名 `muka`，crate 名 `muka-focus-stacking`，仓库名 `Muka-Focus-Stacking`。
+> 命令名 `mukastack`，crate 名 `muka-focus-stacking`，仓库名 `Muka-Focus-Stacking`。
 
 把一组**包围对焦**（focus bracketing）照片合成一张全清晰的图片。纯 Rust，不依赖 OpenCV、
 不需要 GPU 运行时，`cargo build --release` 出一个 exe。
@@ -17,13 +17,18 @@
 
 代价与取舍、以及每个决定背后的测量，见下面的「工作原理」和 [开发记录.md](开发记录.md)。
 
+![可莉手办：50 帧包围对焦合成](docs/preview.jpg)
+
+<sub>成品缩略图（1600px）。原图 7008×4672，输出 16 bit PNG。这张照片是我自己拍的，
+拍摄对象的版权说明见 [照片与版权](#照片与版权)。</sub>
+
 ---
 
 ## 构建
 
 ```bash
-cargo build --release          # 产物 target/release/muka.exe
-cargo install --path .         # 或直接装到 PATH，命令名 muka
+cargo build --release          # 产物 target/release/mukastack.exe
+cargo install --path .         # 或直接装到 PATH，命令名 mukastack
 ```
 
 无外部依赖（不需要 OpenCV / OpenCL / CUDA）。多核并行（rayon）。
@@ -34,13 +39,13 @@ cargo install --path .         # 或直接装到 PATH，命令名 muka
 
 ```bash
 # 1) 直接给一个目录（自动按文件名排序、自动剔除尺寸不一致的成品牌图）
-muka "D:/photos/stack" -o merged.png
+mukastack "D:/photos/stack" -o merged.png
 
 # 2) 想要预览（顺便出 1600px 的 JPEG 便于快速看）
-muka "D:/photos/stack" -o merged.png --preview preview.jpg
+mukastack "D:/photos/stack" -o merged.png --preview preview.jpg
 
 # 3) 素材很大又赶时间：深度分析降到 1/2 分辨率（候选窗口会按尺度自动换算）
-muka "D:/photos/stack" -o merged.png --analysis-scale 2
+mukastack "D:/photos/stack" -o merged.png --analysis-scale 2
 ```
 
 **什么都不用调就是最高质量。** 默认值＝全分辨率深度分析 + `bracket` 融合 + 边缘感知的深度聚合
@@ -48,26 +53,47 @@ muka "D:/photos/stack" -o merged.png --analysis-scale 2
 
 输出 `.png` 是 **16 bit**（8 bit 会在渐变处产生可见的带纹）；给 `.jpg` 则写质量 95 的 8 bit。
 
+## 效果示例
+
+同一台相机、同一个三脚架、同一组照片。左边两张是**原始帧**，右边是**本工具的输出**——
+1:1 裁切，未做任何锐化或修图：
+
+![单帧 vs 合成](docs/single-frame-vs-stack.jpg)
+
+<sub>裁切位置：输出画布 x3200–4300、y1050–1800（可莉的面部与右侧背景墙）。
+帧 15 是面部最清晰的那一帧（此时背景墙完全虚掉），帧 28 是背景墙最清晰的那一帧
+（此时面部已经软了 56%）。合成结果把两者都取上。</sub>
+
+这是 `--save-depth` 导出的逐像素深度场（也就是「每个像素取自哪一帧」），可以直接用来检查
+深度有没有串（比如轮廓外有没有被误判成前景）：
+
+![深度场](docs/depth-map.jpg)
+
+<sub>颜色 = 帧号，蓝＝近、红＝远。房间左角的墙最近、右墙最远，手办本体是最近的一层。
+把这张图和输出叠起来看，是排查「某块区域发虚/发亮」最快的办法。</sub>
+
+上面的图都是这套参数直接跑出来的（命令见 [快速开始](#快速开始)），没有人工修饰。
+
 ## 用法
 
 ```bash
 # 基本：给目录，或直接给一串文件（可以混）
-muka 帧目录 -o merged.png
-muka a.jpg b.jpg c.jpg -o merged.png
+mukastack 帧目录 -o merged.png
+mukastack a.jpg b.jpg c.jpg -o merged.png
 
 # 最平滑（不逐频段仲裁）：几乎没有合成痕迹，但明显更软
-muka 帧目录 -o soft.png --mode pyramid
+mukastack 帧目录 -o soft.png --mode pyramid
 
 # 最锐（逐频段全栈取最大）：锐但会带光晕与噪声，一般不用
-muka 帧目录 -o hard.png --mode max
+mukastack 帧目录 -o hard.png --mode max
 
 # 只要原图不裁切 / 手动指定裁切区 x,y,w,h
-muka 帧目录 -o merged.png --no-crop
-muka 帧目录 -o merged.png --crop 1400,300,4275,4002
+mukastack 帧目录 -o merged.png --no-crop
+mukastack 帧目录 -o merged.png --crop 1400,300,4275,4002
 
 # 诊断：导出深度场 / 夹取用的帧范围 / 预览图
-muka 帧目录 -o merged.png --save-depth d.png --save-conf c.png --save-range r
-muka 帧目录 -o merged.png --debug-point 2700,1800        # 该画布坐标的逐帧响应
+mukastack 帧目录 -o merged.png --save-depth d.png --save-conf c.png --save-range r
+mukastack 帧目录 -o merged.png --debug-point 2700,1800        # 该画布坐标的逐帧响应
 ```
 
 ### 三种融合模式怎么选
@@ -320,7 +346,7 @@ muka 帧目录 -o merged.png --debug-point 2700,1800        # 该画布坐标的
 
 在参照成品裁切区内的 6 个典型区域，与 AF导出 的轮廓锐度之比（原点自动定位，见 ⑤）：
 
-| 区域 | AF导出（绝对值） | muka | 比值 |
+| 区域 | AF导出（绝对值） | mukastack | 比值 |
 |---|---|---|---|
 | 背景墙（浮雕） | 19.13 | 23.33 | **1.22** |
 | 膝盖边缘 | 47.12 | 56.27 | **1.19** |
@@ -345,6 +371,7 @@ src/
   align.rs     低通后的梯度特征、2D FFT 相位相关、两级尺度搜索、三次插值重采样
   fuse.rs      裁切计算、双累积器金字塔融合、能量加权候选合并、频段软阈值去噪
 tools/         Python 侦察/评估脚本（不参与构建，见下）
+docs/          README 里用到的示例图（都是本工具在这套素材上的真实输出）
 ```
 
 ## 分析工具（tools/）
@@ -428,9 +455,20 @@ tools/         Python 侦察/评估脚本（不参与构建，见下）
 
 ---
 
+## 照片与版权
+
+`docs/` 与 README 里的示例照片是**本项目作者 Attect 拍摄的**（索尼 33MP × 50 帧包围对焦），
+用于展示本工具的效果；转载时请注明拍摄者并保留本说明。
+
+照片里的手办是游戏《原神》角色「可莉」的立体化商品，**角色形象与造型设计的著作权归
+米哈游（miHoYo）所有**。本项目与米哈游没有任何关联，也未经其授权、赞助或认可；
+这些照片仅用于技术演示，不作商业用途。完整说明见 [docs/CREDITS.md](docs/CREDITS.md)。
+
+---
+
 ## 许可证
 
-MIT，见 [LICENSE](LICENSE)。
+代码：**MIT**，见 [LICENSE](LICENSE)。
 
 ## 关于分析脚本的路径
 
