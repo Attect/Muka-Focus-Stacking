@@ -1,7 +1,5 @@
 # Muka-Focus-Stacking
 
-> 命令名 `mukastack`，crate 名 `muka-focus-stacking`，仓库名 `Muka-Focus-Stacking`。
-
 把一组**包围对焦**（focus bracketing）照片合成一张全清晰的图片。纯 Rust，不依赖 OpenCV、
 不需要 GPU 运行时，`cargo build --release` 出一个 exe。
 
