@@ -348,6 +348,22 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     clamp_hi_dilate: usize,
 
+    /// Radius, in pixels, over which the colour a nearer surface spills onto
+    /// whatever stands behind it is pulled back to that surface's own colour.
+    /// 0 (the default) leaves it alone.
+    ///
+    /// Defocus ignores silhouettes: a coloured object in front of a wall spreads
+    /// its light onto that wall, so the wall just outside the outline carries a
+    /// wash of the object's hue, 15-20 px wide. It is real - every frame of the
+    /// reference stack carries more of it than the fusion does - but it reads as
+    /// the object glowing onto the wall, and the hand-retouched reference has
+    /// removed it.
+    ///
+    /// The judgement is made on the depth field, never on colour, so the surface
+    /// behind may be anything. Only low-frequency colour is touched.
+    #[arg(long, default_value_t = 0)]
+    spill: usize,
+
     /// Write the per-pixel frame range the clamp enforces, as `<prefix>_lo.png`
     /// and `<prefix>_hi.png` (16-bit, value x256). This is the only authority on
     /// whether a value in the output is one that no frame contains.
@@ -1579,6 +1595,7 @@ fn main() -> Result<()> {
         clamp_hi: !args.no_clamp_hi,
         clamp_slack: args.clamp_slack,
         clamp_hi_dilate: args.clamp_hi_dilate,
+        spill: args.spill,
         save_range: args.save_range.clone(),
         conf: if args.conf_band {
             // Gate on how *locally smooth the depth itself* is.

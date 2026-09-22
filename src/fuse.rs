@@ -18,7 +18,7 @@
 
 use crate::align::{warp_grid_region_par, Parallax, Transform};
 use crate::pyramid::{collapse, gaussian_pyramid, Grid};
-use crate::util::{Plane, RgbImage};
+use crate::util::{box_blur, Plane, RgbImage};
 use rayon::prelude::*;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -203,6 +203,11 @@ pub struct FuseOptions {
     /// cuts into real relief; dilating asks "did any frame, anywhere nearby,
     /// reach this value" instead. 0 uses the raw bound. See [`clamp_to_range`].
     pub clamp_hi_dilate: usize,
+
+    /// Radius, in pixels, over which the colour a nearer surface spills onto the
+    /// surface behind it is pulled back to that surface's own colour. 0 disables.
+    /// See [`suppress_depth_spill`].
+    pub spill: usize,
     /// Write the per-pixel frame range that the clamp uses, for diagnosis. The
     /// bound is built from the *warped* frames, so it is the only authority on
     /// whether a value the fusion produced is one that no frame contains.
@@ -486,6 +491,7 @@ pub fn fuse(
             denoise_bands(&mut lp, opts.denoise);
             let mut out = collapse(&lp);
             clamp_to_range(&mut out.d, &range_lo, &range_hi, ow, oh, 3, opts);
+            suppress_depth_spill(&mut out.d, ow, oh, &dlev[0], 0.0, (n - 1) as f32, opts.spill);
             Ok(RgbImage { w: out.w, h: out.h, d: out.d })
         }
         FusionMode::Max => {
@@ -517,6 +523,7 @@ pub fn fuse(
             denoise_bands(&mut lp, opts.denoise);
             let mut out = collapse(&lp);
             clamp_to_range(&mut out.d, &range_lo, &range_hi, ow, oh, 3, opts);
+            suppress_depth_spill(&mut out.d, ow, oh, &dlev[0], 0.0, (n - 1) as f32, opts.spill);
             Ok(RgbImage { w: out.w, h: out.h, d: out.d })
         }
         FusionMode::Pixel | FusionMode::Hard => {
@@ -529,12 +536,259 @@ pub fn fuse(
             }
             let mut img = RgbImage { w: ow, h: oh, d: out };
             clamp_to_range(&mut img.d, &range_lo, &range_hi, ow, oh, 3, opts);
+            suppress_depth_spill(&mut img.d, ow, oh, &dlev[0], 0.0, (n - 1) as f32, opts.spill);
             Ok(img)
         }
     }
 }
 
+/// Separable min or max filter over a single-channel plane.
+fn sep_extreme(src: &[f32], w: usize, h: usize, r: usize, want_min: bool) -> Vec<f32> {
+    let mut tmp = vec![0.0f32; src.len()];
+    tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let a = x.saturating_sub(r);
+            let b = (x + r).min(w - 1);
+            let mut v = src[y * w + a];
+            for k in a + 1..=b {
+                let s = src[y * w + k];
+                if (want_min && s < v) || (!want_min && s > v) {
+                    v = s;
+                }
+            }
+            row[x] = v;
+        }
+    });
+    let mut out = vec![0.0f32; src.len()];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let a = y.saturating_sub(r);
+        let b = (y + r).min(h - 1);
+        for x in 0..w {
+            let mut v = tmp[a * w + x];
+            for k in a + 1..=b {
+                let s = tmp[k * w + x];
+                if (want_min && s < v) || (!want_min && s > v) {
+                    v = s;
+                }
+            }
+            row[x] = v;
+        }
+    });
+    out
+}
+
+/// Remove the colour that a nearer surface spills onto whatever stands behind it.
+///
+/// Defocus does not respect silhouettes: a coloured object in front of a wall
+/// spreads its light onto that wall, so just outside the outline the wall carries
+/// a wash of the object's hue, 15-20 px wide on the reference stack. It is
+/// physically real — *every* frame of that stack carries more of it than the
+/// fusion does (36-52 units of R-G against the output's 24) — but it reads as the
+/// object glowing onto the wall, and the hand-retouched reference has all but
+/// removed it.
+///
+/// The decision is made on the **depth field alone**, never on colour, so the
+/// background may be a grey wall, a green cloth or a wooden table: the wash can
+/// only appear on the *far* side of a depth step, because that is the only place
+/// a nearer surface can spill onto. Two things follow from that.
+///
+/// * The pixels to correct are the ones within `radius` of a place where the
+///   depth field jumps by more than a few frames.
+/// * The colour to use instead comes from the **same depth slice**, sampled well
+///   away from any jump, so it is the colour of the background itself at that
+///   distance and not a mixture of background and object.
+///
+/// Only the low-frequency colour is changed: the correction is a per-slice colour
+/// offset applied to a block average, so texture and detail come through
+/// untouched. `radius == 0` disables it.
+pub fn suppress_depth_spill(
+    d: &mut [f32],
+    w: usize,
+    h: usize,
+    depth: &[f32],
+    near: f32,
+    far: f32,
+    radius: usize,
+) {
+    const S: usize = 4; // work at 1/4 resolution: this is a colour correction
+    const K: usize = 8; // depth slices used to pick the replacement colour
+    const STEP: f32 = 3.0; // frames of depth jump that count as a silhouette
+    if radius == 0 || w < 8 * S || h < 8 * S || depth.len() < w * h {
+        return;
+    }
+    let (sw, sh) = (w / S, h / S);
+    let n4 = sw * sh;
+    let inv = 1.0 / (S * S) as f32;
+
+    // ---- colour and depth at 1/4 scale -------------------------------------
+    let mut col = vec![0.0f32; n4 * 3];
+    col.par_chunks_mut(3).enumerate().for_each(|(i, px)| {
+        let (bx, by) = (i % sw, i / sw);
+        let mut acc = [0.0f32; 3];
+        for y in 0..S {
+            for x in 0..S {
+                let si = ((by * S + y) * w + bx * S + x) * 3;
+                acc[0] += d[si];
+                acc[1] += d[si + 1];
+                acc[2] += d[si + 2];
+            }
+        }
+        px[0] = acc[0] * inv;
+        px[1] = acc[1] * inv;
+        px[2] = acc[2] * inv;
+    });
+    let mut dep = vec![0.0f32; n4];
+    dep.par_iter_mut().enumerate().for_each(|(i, v)| {
+        let (bx, by) = (i % sw, i / sw);
+        let mut acc = 0.0f32;
+        for y in 0..S {
+            for x in 0..S {
+                acc += depth[(by * S + y) * w + bx * S + x];
+            }
+        }
+        *v = acc * inv;
+    });
+
+    // ---- where a silhouette is, and how far each pixel is from one ---------
+    //
+    // The silhouette is the depth *gradient*, not the local depth span. A span
+    // test with a window as wide as the reference radius marks a band tens of
+    // pixels thick, which leaves no "far from a silhouette" pixel inside the
+    // reference window - and then the pass silently does nothing where it is
+    // needed. A gradient gives a line a pixel or two wide, so the distance field
+    // and the reference regions both mean what they say.
+    let rw = (radius / S).max(2);
+    let smooth = box_blur(&Plane { w: sw, h: sh, d: dep.clone() }, 2);
+    let mut cur = vec![0.0f32; n4];
+    cur.par_iter_mut().enumerate().for_each(|(i, v)| {
+        let (bx, by) = (i % sw, i / sw);
+        let gx = if bx + 1 < sw { smooth.d[i + 1] - smooth.d[i] } else { 0.0 };
+        let gy = if by + 1 < sh { smooth.d[i + sw] - smooth.d[i] } else { 0.0 };
+        *v = if (gx * gx + gy * gy).sqrt() > STEP { 1.0 } else { 0.0 };
+    });
+    let cap = radius / S + 1;
+    let mut dist = vec![(cap + 1) as f32; n4];
+    for k in 0..=cap {
+        for i in 0..n4 {
+            if cur[i] > 0.0 && dist[i] > cap as f32 {
+                dist[i] = k as f32;
+            }
+        }
+        if k == cap {
+            break;
+        }
+        let p = Plane { w: sw, h: sh, d: cur.clone() };
+        let b = box_blur(&p, 1);
+        cur.par_iter_mut().enumerate().for_each(|(i, v)| {
+            *v = if b.d[i] > 0.0 { 1.0 } else { 0.0 };
+        });
+    }
+
+    // ---- reference colour: this depth slice and everything beyond it --------
+    //
+    // A pixel standing on a surface should be coloured like that surface, and the
+    // surfaces in front of it must not vote. Depth slices give exactly that: for a
+    // pixel in slice k the reference is the average colour of slices k..K-1, which
+    // contains the pixel's own surface and everything behind it, and never
+    // anything in front. Accumulating from the far end inwards makes that one pass
+    // over the slices.
+    let slice: Vec<usize> = dep
+        .iter()
+        .map(|v| {
+            let t = if far > near {
+                ((v - near) / (far - near)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            ((t * K as f32) as usize).min(K - 1)
+        })
+        .collect();
+    let dmax = sep_extreme(&dep, sw, sh, rw, false);
+    let far_side = {
+        let mut f = vec![false; n4];
+        f.par_iter_mut().enumerate().for_each(|(i, v)| {
+            *v = dmax[i] - dep[i] < STEP;
+        });
+        f
+    };
+    let mut refc = vec![f32::NAN; n4 * 3];
+    let mut cumw = vec![0.0f32; n4];
+    let mut cumc = vec![0.0f32; n4 * 3];
+    for kk in (0..K).rev() {
+        let mut mask = Plane::new(sw, sh);
+        // Weight each candidate by how far it stands from the silhouette. The
+        // wash is *on* the surface behind, so the pixels closest to the silhouette
+        // are the contaminated ones and must not vote for their own replacement;
+        // the far ones are the surface's own colour, which is what we want. Without
+        // this the average is pulled back towards the wash and the pass changes
+        // brightness without changing hue at all.
+        mask.d.par_iter_mut().enumerate().for_each(|(i, v)| {
+            *v = if slice[i] == kk {
+                (dist[i] - 1.0).clamp(0.0, cap as f32) / cap as f32
+            } else {
+                0.0
+            };
+        });
+        if mask.d.iter().sum::<f32>() < 50.0 {
+            continue;
+        }
+        let wsum = box_blur(&mask, rw);
+        cumw.par_iter_mut().enumerate().for_each(|(i, v)| {
+            *v += wsum.d[i];
+        });
+        for ch in 0..3 {
+            let mut p = Plane::new(sw, sh);
+            p.d.par_iter_mut().enumerate().for_each(|(i, v)| {
+                *v = col[i * 3 + ch] * mask.d[i];
+            });
+            let sums = box_blur(&p, rw);
+            cumc.par_chunks_mut(3).enumerate().for_each(|(i, px)| {
+                px[ch] += sums.d[i];
+            });
+        }
+        refc.par_chunks_mut(3).enumerate().for_each(|(i, px)| {
+            if slice[i] != kk || cumw[i] < 0.3 {
+                return;
+            }
+            for ch in 0..3 {
+                px[ch] = cumc[i * 3 + ch] / cumw[i];
+            }
+        });
+    }
+
+    // ---- apply the offset, leaving the detail in place ---------------------
+    let mut off = vec![0.0f32; n4 * 3];
+    let mut alpha = vec![0.0f32; n4];
+    for i in 0..n4 {
+        if !refc[i * 3].is_finite() {
+            continue;
+        }
+        let a = (1.0 - dist[i] / (cap as f32 + 1.0)).clamp(0.0, 1.0);
+        let a = if far_side[i] { a } else { 0.0 };
+        if a <= 0.0 {
+            continue;
+        }
+        alpha[i] = a;
+        for ch in 0..3 {
+            off[i * 3 + ch] = (refc[i * 3 + ch] - col[i * 3 + ch]) * a;
+        }
+    }
+    d.par_chunks_mut(3).enumerate().for_each(|(i, px)| {
+        let (bx, by) = (i % w, i / w);
+        // w and h are not multiples of S, so the last block row/column of the
+        // coarse grid has to be clamped into range.
+        let j = (by / S).min(sh - 1) * sw + (bx / S).min(sw - 1);
+        if alpha[j] <= 0.0 {
+            return;
+        }
+        for ch in 0..3 {
+            px[ch] += off[j * 3 + ch];
+        }
+    });
+}
+
 /// Fold one warped frame into the per-pixel min/max range.
+
 fn note_range(lo: &mut [f32], hi: &mut [f32], g: &Grid) {
     if lo.is_empty() {
         return;
