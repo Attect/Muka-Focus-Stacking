@@ -350,18 +350,22 @@ struct Cli {
 
     /// Radius, in pixels, over which the colour a nearer surface spills onto
     /// whatever stands behind it is pulled back to that surface's own colour.
-    /// 0 (the default) leaves it alone.
+    /// 0 leaves it alone.
     ///
     /// Defocus ignores silhouettes: a coloured object in front of a wall spreads
     /// its light onto that wall, so the wall just outside the outline carries a
     /// wash of the object's hue, 15-20 px wide. It is real - every frame of the
     /// reference stack carries more of it than the fusion does - but it reads as
-    /// the object glowing onto the wall, and the hand-retouched reference has
-    /// removed it.
+    /// the object glowing onto the wall, and a retoucher removes it by hand.
+    /// Measured on the reference stack, at 4/6/8 px outside a petal, the red
+    /// excess goes from 24.1/24.1/22.7 to 9.9/3.3/3.1, against 9.8/8.1/8.7 for
+    /// the hand-retouched reference; the figure's own edge is untouched.
     ///
     /// The judgement is made on the depth field, never on colour, so the surface
-    /// behind may be anything. Only low-frequency colour is touched.
-    #[arg(long, default_value_t = 0)]
+    /// behind may be anything: the wash can only appear on the far side of a
+    /// depth step, and the replacement colour is taken from that surface where it
+    /// is clear of the figure. Only low-frequency colour is touched.
+    #[arg(long, default_value_t = 20)]
     spill: usize,
 
     /// Write the per-pixel frame range the clamp enforces, as `<prefix>_lo.png`

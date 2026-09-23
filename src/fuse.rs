@@ -491,7 +491,7 @@ pub fn fuse(
             denoise_bands(&mut lp, opts.denoise);
             let mut out = collapse(&lp);
             clamp_to_range(&mut out.d, &range_lo, &range_hi, ow, oh, 3, opts);
-            suppress_depth_spill(&mut out.d, ow, oh, &dlev[0], 0.0, (n - 1) as f32, opts.spill);
+            suppress_depth_spill(&mut out.d, ow, oh, &dlev[0], opts.spill);
             Ok(RgbImage { w: out.w, h: out.h, d: out.d })
         }
         FusionMode::Max => {
@@ -523,7 +523,7 @@ pub fn fuse(
             denoise_bands(&mut lp, opts.denoise);
             let mut out = collapse(&lp);
             clamp_to_range(&mut out.d, &range_lo, &range_hi, ow, oh, 3, opts);
-            suppress_depth_spill(&mut out.d, ow, oh, &dlev[0], 0.0, (n - 1) as f32, opts.spill);
+            suppress_depth_spill(&mut out.d, ow, oh, &dlev[0], opts.spill);
             Ok(RgbImage { w: out.w, h: out.h, d: out.d })
         }
         FusionMode::Pixel | FusionMode::Hard => {
@@ -536,7 +536,7 @@ pub fn fuse(
             }
             let mut img = RgbImage { w: ow, h: oh, d: out };
             clamp_to_range(&mut img.d, &range_lo, &range_hi, ow, oh, 3, opts);
-            suppress_depth_spill(&mut img.d, ow, oh, &dlev[0], 0.0, (n - 1) as f32, opts.spill);
+            suppress_depth_spill(&mut img.d, ow, oh, &dlev[0], opts.spill);
             Ok(img)
         }
     }
@@ -606,13 +606,13 @@ pub fn suppress_depth_spill(
     w: usize,
     h: usize,
     depth: &[f32],
-    near: f32,
-    far: f32,
     radius: usize,
 ) {
     const S: usize = 4; // work at 1/4 resolution: this is a colour correction
-    const K: usize = 8; // depth slices used to pick the replacement colour
     const STEP: f32 = 3.0; // frames of depth jump that count as a silhouette
+    /// Share of the reference window that must hold usable samples before the
+    /// correction is applied at full strength.
+    const TRUST: f32 = 0.05;
     if radius == 0 || w < 8 * S || h < 8 * S || depth.len() < w * h {
         return;
     }
@@ -684,75 +684,39 @@ pub fn suppress_depth_spill(
         });
     }
 
-    // ---- reference colour: this depth slice and everything beyond it --------
+    // ---- reference colour: the surface behind, sampled clear of the figure ---
     //
-    // A pixel standing on a surface should be coloured like that surface, and the
-    // surfaces in front of it must not vote. Depth slices give exactly that: for a
-    // pixel in slice k the reference is the average colour of slices k..K-1, which
-    // contains the pixel's own surface and everything behind it, and never
-    // anything in front. Accumulating from the far end inwards makes that one pass
-    // over the slices.
-    let slice: Vec<usize> = dep
-        .iter()
-        .map(|v| {
-            let t = if far > near {
-                ((v - near) / (far - near)).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            ((t * K as f32) as usize).min(K - 1)
-        })
-        .collect();
+    // A pixel standing on the surface behind should be coloured like that surface.
+    // The candidates are the pixels that are *both* clear of the silhouette - the
+    // wash hugs it, so they are the contaminated ones - and on its far side, since
+    // the near side is the figure itself. Averaging them over a window several
+    // times the correction radius gives the surface's own colour.
+    //
+    // An earlier attempt took the replacement from "the same depth slice" instead.
+    // That fails, because the wash is *on* the surface behind: the replacement and
+    // the thing it replaces are in the same slice, so excluding the wash leaves
+    // nothing to sample from and including it pulls the answer back towards the
+    // wash. Distance from the silhouette is the discriminator that works.
     let dmax = sep_extreme(&dep, sw, sh, rw, false);
-    let far_side = {
-        let mut f = vec![false; n4];
-        f.par_iter_mut().enumerate().for_each(|(i, v)| {
-            *v = dmax[i] - dep[i] < STEP;
+    let mut mask = Plane::new(sw, sh);
+    mask.d.par_iter_mut().enumerate().for_each(|(i, v)| {
+        *v = if dist[i] > cap as f32 && dmax[i] - dep[i] < STEP {
+            1.0
+        } else {
+            0.0
+        };
+    });
+    let rwm = rw * 4;
+    let wsum = box_blur(&mask, rwm);
+    let mut refc = vec![0.0f32; n4 * 3];
+    for ch in 0..3 {
+        let mut p = Plane::new(sw, sh);
+        p.d.par_iter_mut().enumerate().for_each(|(i, v)| {
+            *v = col[i * 3 + ch] * mask.d[i];
         });
-        f
-    };
-    let mut refc = vec![f32::NAN; n4 * 3];
-    let mut cumw = vec![0.0f32; n4];
-    let mut cumc = vec![0.0f32; n4 * 3];
-    for kk in (0..K).rev() {
-        let mut mask = Plane::new(sw, sh);
-        // Weight each candidate by how far it stands from the silhouette. The
-        // wash is *on* the surface behind, so the pixels closest to the silhouette
-        // are the contaminated ones and must not vote for their own replacement;
-        // the far ones are the surface's own colour, which is what we want. Without
-        // this the average is pulled back towards the wash and the pass changes
-        // brightness without changing hue at all.
-        mask.d.par_iter_mut().enumerate().for_each(|(i, v)| {
-            *v = if slice[i] == kk {
-                (dist[i] - 1.0).clamp(0.0, cap as f32) / cap as f32
-            } else {
-                0.0
-            };
-        });
-        if mask.d.iter().sum::<f32>() < 50.0 {
-            continue;
-        }
-        let wsum = box_blur(&mask, rw);
-        cumw.par_iter_mut().enumerate().for_each(|(i, v)| {
-            *v += wsum.d[i];
-        });
-        for ch in 0..3 {
-            let mut p = Plane::new(sw, sh);
-            p.d.par_iter_mut().enumerate().for_each(|(i, v)| {
-                *v = col[i * 3 + ch] * mask.d[i];
-            });
-            let sums = box_blur(&p, rw);
-            cumc.par_chunks_mut(3).enumerate().for_each(|(i, px)| {
-                px[ch] += sums.d[i];
-            });
-        }
+        let sums = box_blur(&p, rwm);
         refc.par_chunks_mut(3).enumerate().for_each(|(i, px)| {
-            if slice[i] != kk || cumw[i] < 0.3 {
-                return;
-            }
-            for ch in 0..3 {
-                px[ch] = cumc[i * 3 + ch] / cumw[i];
-            }
+            px[ch] = sums.d[i] / wsum.d[i].max(1e-3);
         });
     }
 
@@ -760,11 +724,15 @@ pub fn suppress_depth_spill(
     let mut off = vec![0.0f32; n4 * 3];
     let mut alpha = vec![0.0f32; n4];
     for i in 0..n4 {
-        if !refc[i * 3].is_finite() {
-            continue;
+        if dmax[i] - dep[i] >= STEP {
+            continue; // this pixel is on the figure, not on the surface behind
         }
-        let a = (1.0 - dist[i] / (cap as f32 + 1.0)).clamp(0.0, 1.0);
-        let a = if far_side[i] { a } else { 0.0 };
+        // How much of the window held a usable reference. A hard test here would
+        // throw away the pixels nearest the silhouette - exactly the ones that
+        // need the correction - because the sample count is naturally lowest
+        // there; a soft ramp keeps them, at a weight that says how much to trust.
+        let rel = (wsum.d[i] / TRUST).clamp(0.0, 1.0);
+        let a = (1.0 - dist[i] / (cap as f32 + 1.0)).clamp(0.0, 1.0) * rel;
         if a <= 0.0 {
             continue;
         }
@@ -773,16 +741,34 @@ pub fn suppress_depth_spill(
             off[i * 3 + ch] = (refc[i * 3 + ch] - col[i * 3 + ch]) * a;
         }
     }
+    // Bilinear, *not* nearest. The correction lives on a 1/S grid; replicating
+    // those cells prints a 1/S-pixel checkerboard of colour steps over everything
+    // it touches, which shows up as a large rise in gradient energy on a flat
+    // backdrop (measured: 27.8 to 42.7) - the pass is supposed to change hue, not
+    // to add edges.
     d.par_chunks_mut(3).enumerate().for_each(|(i, px)| {
         let (bx, by) = (i % w, i / w);
-        // w and h are not multiples of S, so the last block row/column of the
-        // coarse grid has to be clamped into range.
-        let j = (by / S).min(sh - 1) * sw + (bx / S).min(sw - 1);
-        if alpha[j] <= 0.0 {
-            return;
-        }
+        let fx = bx as f32 / S as f32 - 0.5;
+        let fy = by as f32 / S as f32 - 0.5;
+        let (x0, y0) = (fx.floor(), fy.floor());
+        let (tx, ty) = (fx - x0, fy - y0);
+        let (x0c, x1c) = (
+            (x0 as i64).clamp(0, sw as i64 - 1) as usize,
+            (x0 as i64 + 1).clamp(0, sw as i64 - 1) as usize,
+        );
+        let (y0c, y1c) = (
+            (y0 as i64).clamp(0, sh as i64 - 1) as usize,
+            (y0 as i64 + 1).clamp(0, sh as i64 - 1) as usize,
+        );
+        let (a00, a01) = ((1.0 - tx) * (1.0 - ty), tx * (1.0 - ty));
+        let (a10, a11) = ((1.0 - tx) * ty, tx * ty);
+        let (i00, i01) = (y0c * sw + x0c, y0c * sw + x1c);
+        let (i10, i11) = (y1c * sw + x0c, y1c * sw + x1c);
         for ch in 0..3 {
-            px[ch] += off[j * 3 + ch];
+            px[ch] += off[i00 * 3 + ch] * a00
+                + off[i01 * 3 + ch] * a01
+                + off[i10 * 3 + ch] * a10
+                + off[i11 * 3 + ch] * a11;
         }
     });
 }
