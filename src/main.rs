@@ -486,6 +486,28 @@ struct Cli {
     #[arg(long, default_value_t = 2)]
     depth_smooth: usize,
 
+    /// Radius, in output pixels, over which the depth field is eroded towards
+    /// the nearer surface: every pixel takes the nearest depth found within that
+    /// distance. See `depth::near_dilate`.
+    ///
+    /// This is for the band *inside* a silhouette, where the focus measure's
+    /// window straddled the boundary and the far surface's relief won the
+    /// argmax, so the near object's edge is rendered from frames in which the
+    /// near object is defocused and the far surface's sharp detail is printed on
+    /// it. No frame contains that detail: wherever the far surface is sharp, the
+    /// near object's bloom covers this band. The reference exports show a smooth
+    /// band there.
+    ///
+    /// Default 16 (2026-09-24). Measured on the reference stack it takes the two
+    /// broken silhouettes — the hair lock and the knee — back to a continuous
+    /// curve, and takes the colour wash outside the petal from 8.8 to 6.6 and the
+    /// band outside the boot from 136.5 to 155.1 levels, both better than the
+    /// hand retouch (7.3 and 150.9). The cost is 0.8% of the backdrop's texture
+    /// energy and at most 0.02 off any region's acutance (the knee gains 0.02).
+    /// 0 disables.
+    #[arg(long, default_value_t = 16)]
+    near_dilate: usize,
+
     /// Extra aggregation radius used only for judging whether a pixel carries
     /// focus information. Reliability is a peak-to-mean ratio, and on a single
     /// pixel that ratio is dominated by residual noise — so much so that a
@@ -1360,6 +1382,15 @@ fn main() -> Result<()> {
     }
 
     trace_row("4 final", &dfield);
+
+    // Erode the depth towards the nearer surface, so the band just inside a
+    // silhouette belongs to the object rather than to the backdrop behind it.
+    // See `--near-dilate` and `depth::near_dilate`.
+    if args.near_dilate > 0 {
+        let r = (args.near_dilate / factor).max(1);
+        dfield = depth::near_dilate(&dfield, r);
+        trace_row("5 near-dilate", &dfield);
+    }
 
     // Manual depth overrides, applied after everything else so that nothing can
     // undo them.

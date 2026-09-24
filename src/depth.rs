@@ -762,3 +762,68 @@ pub fn upsample_depth(src: &Plane, tw: usize, th: usize) -> Plane {
         d: upsample_plane_bilinear(&src.d, src.w, src.h, tw, th),
     }
 }
+
+/// Erode the depth index towards the nearer surface: every pixel takes the
+/// nearest depth found within `r` pixels.
+///
+/// The focus measure's window straddles a silhouette, and there the far
+/// surface's response usually wins — its relief is the only texture in the
+/// window, while a smooth low-contrast object contributes almost nothing. The
+/// depth step therefore lands tens of pixels *inside* the near object, and that
+/// band is then rendered from frames in which the near object is defocused: its
+/// own bloom is replaced by the far surface's sharp detail, which reads as a
+/// silhouette that has been chewed away.
+///
+/// Eroding gives that band the near surface's depth instead. It is not a fudge:
+/// no frame contains the far surface's sharp detail there, because in every
+/// frame where that surface *is* sharp the near object's defocused image covers
+/// exactly that band. The reference exports resolve it the same way, with a
+/// smooth band along the near side of the silhouette.
+pub fn near_dilate(src: &Plane, r: usize) -> Plane {
+    let (w, h) = (src.w, src.h);
+    let mut tmp = vec![0.0f32; w * h];
+    tmp.par_chunks_mut(w)
+        .enumerate()
+        .for_each(|(y, out)| slide_min(&src.d[y * w..y * w + w], out, r));
+    let mut res = vec![0.0f32; w * h];
+    // Column pass: gather, filter, scatter. One column per worker keeps the
+    // parallel overhead away from the inner loop.
+    let cols: Vec<Vec<f32>> = (0..w)
+        .into_par_iter()
+        .map(|x| {
+            let col: Vec<f32> = (0..h).map(|y| tmp[y * w + x]).collect();
+            let mut o = vec![0.0f32; h];
+            slide_min(&col, &mut o, r);
+            o
+        })
+        .collect();
+    for (x, o) in cols.iter().enumerate() {
+        for (y, v) in o.iter().enumerate() {
+            res[y * w + x] = *v;
+        }
+    }
+    Plane { w, h, d: res }
+}
+
+/// Sliding-window minimum over `[i - r, i + r]`, clamped at the ends.
+fn slide_min(src: &[f32], dst: &mut [f32], r: usize) {
+    use std::collections::VecDeque;
+    let n = src.len();
+    let mut dq: VecDeque<usize> = VecDeque::new();
+    let mut right = 0usize;
+    for i in 0..n {
+        let hi = (i + r).min(n - 1);
+        while right <= hi {
+            while dq.back().is_some_and(|&b| src[b] >= src[right]) {
+                dq.pop_back();
+            }
+            dq.push_back(right);
+            right += 1;
+        }
+        let lo = i.saturating_sub(r);
+        while dq.front().is_some_and(|&f| f < lo) {
+            dq.pop_front();
+        }
+        dst[i] = src[*dq.front().expect("window never empty")];
+    }
+}
