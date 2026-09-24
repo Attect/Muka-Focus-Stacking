@@ -1,11 +1,15 @@
 """Downscaled overview with a coordinate grid labelled in reference-crop pixels,
 so regions can be located precisely before zooming in."""
+import os
 import numpy as np
 from PIL import Image, ImageDraw
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 AF_X, AF_Y = 1288, 488
-im = Image.open(r"B:\FocusMerge\out\final.png").convert("RGB")
+im = Image.open(os.path.join(ROOT, "out/final.png")).convert("RGB")
 scale = 1400 / im.width
 small = im.resize((1400, int(im.height * scale)), Image.LANCZOS)
 dr = ImageDraw.Draw(small)
@@ -22,5 +26,5 @@ for ay in range(0, 4003, step):
         break
     dr.line([(0, sy), (small.width, sy)], fill=(255, 0, 0), width=1)
     dr.text((4, sy + 3), str(ay), fill=(255, 0, 0))
-small.save(r"B:\FocusMerge\out\overview_grid.png")
+small.save(os.path.join(ROOT, "out/overview_grid.png"))
 print("wrote out/overview_grid.png", small.size)

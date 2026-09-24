@@ -3,9 +3,12 @@ import os
 import numpy as np
 from PIL import Image, ImageDraw
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
-OUT = r"B:\FocusMerge\preview"
+OUT = os.path.join(ROOT, "preview")
 os.makedirs(OUT, exist_ok=True)
 
 files = sorted(f for f in os.listdir(D) if f.upper().startswith("DSC") and f.upper().endswith(".JPG"))

@@ -8,6 +8,9 @@ import sys
 import numpy as np
 from PIL import Image, ImageDraw
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 AF_X, AF_Y = 1288, 488
@@ -31,9 +34,9 @@ for i in frames:
     labels.append("frame %d" % i)
 
 for name, path in [
-    ("fix2 bracket", r"B:\FocusMerge\out\fix2.png"),
-    ("hard pick", r"B:\FocusMerge\out\hard.png"),
-    ("pyramid", r"B:\FocusMerge\out\pyr.png"),
+    ("fix2 bracket", os.path.join(ROOT, "out/fix2.png")),
+    ("hard pick", os.path.join(ROOT, "out/hard.png")),
+    ("pyramid", os.path.join(ROOT, "out/pyr.png")),
     ("AF export", None),
 ]:
     if path is None:
@@ -58,5 +61,5 @@ dr = ImageDraw.Draw(out)
 for k, lab in enumerate(labels):
     cy, cx = divmod(k, cols)
     dr.text((cx * cell + 6, cy * (cell + 24) + 6), lab, fill=(0, 0, 0))
-out.save(r"B:\FocusMerge\out\strip_%s.png" % which)
+out.save(os.path.join(ROOT, "out/strip_%s.png") % which)
 print("wrote out/strip_%s.png :" % which, labels)

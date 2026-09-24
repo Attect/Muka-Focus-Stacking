@@ -13,11 +13,14 @@ import os
 import numpy as np
 from PIL import Image
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
-OURS = r"B:\FocusMerge\out\可莉-全清晰.png"
-DEPTH = r"B:\FocusMerge\out\depth_final.png"
-CONF = r"B:\FocusMerge\out\conf.png"
+OURS = os.path.join(ROOT, "out/可莉-全清晰.png")
+DEPTH = os.path.join(ROOT, "out/depth_final.png")
+CONF = os.path.join(ROOT, "out/conf.png")
 
 # AF crop origin inside our output, and our output origin inside the full canvas
 AF_X, AF_Y = 1288, 488
@@ -105,5 +108,5 @@ yy = 0
 for r in rows:
     sheet[yy:yy + r.shape[0], 0:r.shape[1]] = r
     yy += r.shape[0] + 12
-Image.fromarray(sheet.astype(np.uint8)).save(r"B:\FocusMerge\out\worst_crops.png")
+Image.fromarray(sheet.astype(np.uint8)).save(os.path.join(ROOT, "out/worst_crops.png"))
 print("\nwrote out/worst_crops.png")

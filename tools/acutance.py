@@ -12,6 +12,9 @@ import sys
 import numpy as np
 from PIL import Image
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 AF_X, AF_Y = 1288, 488
@@ -48,11 +51,11 @@ def best_raw(x, y, s):
 
 VARIANTS = [
     ("AF export", None),
-    ("hard pick", r"B:\FocusMerge\out\hard.png"),
-    ("bracket denoise .15", r"B:\FocusMerge\out\fix2.png"),
-    ("bracket denoise 0", r"B:\FocusMerge\out\nodenoise.png"),
-    ("pyramid denoise .15", r"B:\FocusMerge\out\pyr.png"),
-    ("pyramid denoise 0", r"B:\FocusMerge\out\pyr_nodenoise.png"),
+    ("hard pick", os.path.join(ROOT, "out/hard.png")),
+    ("bracket denoise .15", os.path.join(ROOT, "out/fix2.png")),
+    ("bracket denoise 0", os.path.join(ROOT, "out/nodenoise.png")),
+    ("pyramid denoise .15", os.path.join(ROOT, "out/pyr.png")),
+    ("pyramid denoise 0", os.path.join(ROOT, "out/pyr_nodenoise.png")),
 ]
 
 af = np.asarray(Image.open(os.path.join(D, "AF导出.png")).convert("RGB"), dtype=np.float32)

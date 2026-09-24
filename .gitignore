@@ -8,6 +8,9 @@
 /.workbuddy
 /.cargo-dl
 
+# 用来做质量对照的第三方实现（focus-stack / ChimpStackr 的二进制）
+/.tools
+
 # 杂项
 *.log
 __pycache__/

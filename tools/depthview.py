@@ -8,6 +8,9 @@ import sys
 import numpy as np
 from PIL import Image, ImageDraw
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 AF_X, AF_Y = 1288, 488
@@ -17,8 +20,8 @@ files = sorted(f for f in os.listdir(D) if f.upper().startswith("DSC") and f.upp
 N = len(files)
 
 cx, cy, half = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
-depth_path = sys.argv[4] if len(sys.argv) > 4 else r"B:\FocusMerge\out\depth3_final.png"
-raw_path = sys.argv[5] if len(sys.argv) > 5 else r"B:\FocusMerge\out\depth3.png"
+depth_path = sys.argv[4] if len(sys.argv) > 4 else os.path.join(ROOT, "out/depth3_final.png")
+raw_path = sys.argv[5] if len(sys.argv) > 5 else os.path.join(ROOT, "out/depth3.png")
 
 x0, y0 = cx - half, cy - half
 size = 2 * half
@@ -35,7 +38,7 @@ h = size // S
 fin_c = fin[ay:ay + h, ax:ax + h]
 raw_c = raw[ay:ay + h, ax:ax + h]
 
-ours = Image.open(r"B:\FocusMerge\out\final.png").crop(
+ours = Image.open(os.path.join(ROOT, "out/final.png")).crop(
     (AF_X + x0, AF_Y + y0, AF_X + x0 + size, AF_Y + y0 + size))
 af = Image.open(os.path.join(D, "AF导出.png")).crop((x0, y0, x0 + size, y0 + size))
 
@@ -62,7 +65,7 @@ for k, (lab, im) in enumerate(tiles):
     dr.text((px + 6, py + 8), "%s   (x=%d..%d y=%d..%d)" % (lab, x0, x0 + size, y0, y0 + size),
             fill=(0, 0, 0))
     sheet.paste(im.resize((cell, cell), Image.LANCZOS), (px, py + 30))
-p = r"B:\FocusMerge\out\depthview_%d_%d.png" % (cx, cy)
+p = os.path.join(ROOT, "out/depthview_%d_%d.png") % (cx, cy)
 sheet.save(p)
 print("wrote", p)
 print("depth in region: raw min %.1f median %.1f max %.1f | final min %.1f median %.1f max %.1f"

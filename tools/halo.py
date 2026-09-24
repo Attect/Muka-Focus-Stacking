@@ -14,13 +14,16 @@ import sys
 import numpy as np
 from PIL import Image
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 AF_X, AF_Y, CV_X, CV_Y = 1288, 488, 20, 13
 files = sorted(f for f in os.listdir(D) if f.upper().startswith("DSC") and f.upper().endswith(".JPG"))
 
 x, y, w, h = [int(v) for v in sys.argv[1].split(",")]
-images = sys.argv[2:] or [r"B:\FocusMerge\out\可莉-全清晰.png"]
+images = sys.argv[2:] or [os.path.join(ROOT, "out/可莉-全清晰.png")]
 # canvas coordinates of the region (raw frames are indexed in canvas coordinates)
 cx, cy = AF_X + x + CV_X, AF_Y + y + CV_Y
 STRIDE = 3

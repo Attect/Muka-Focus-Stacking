@@ -4,12 +4,15 @@ import os
 import numpy as np
 from PIL import Image
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 
 af = np.asarray(Image.open(D + r"\AF导出.png").convert("RGB"), dtype=np.float32)
-png = np.asarray(Image.open(r"B:\FocusMerge\out\merged_pyramid.png").convert("RGB"), dtype=np.float32)
-prev = np.asarray(Image.open(r"B:\FocusMerge\out\merged_pyramid_prev.jpg").convert("RGB"), dtype=np.float32)
+png = np.asarray(Image.open(os.path.join(ROOT, "out/merged_pyramid.png")).convert("RGB"), dtype=np.float32)
+prev = np.asarray(Image.open(os.path.join(ROOT, "out/merged_pyramid_prev.jpg")).convert("RGB"), dtype=np.float32)
 print("shapes af", af.shape, "png", png.shape, "prev", prev.shape)
 print("af   mean per ch", af.reshape(-1, 3).mean(0).round(2), "std", af.std().round(2))
 print("png  mean per ch", png.reshape(-1, 3).mean(0).round(2), "std", png.std().round(2))

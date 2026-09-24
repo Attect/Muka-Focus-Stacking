@@ -11,6 +11,9 @@ import os
 import numpy as np
 from PIL import Image
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 AF_X, AF_Y = 1288, 488
@@ -43,7 +46,7 @@ for i, f in enumerate(files):
     if (i + 1) % 10 == 0:
         print("  %d/%d" % (i + 1, len(files)))
 
-im = Image.open(r"B:\FocusMerge\out\final.png").convert("RGB")
+im = Image.open(os.path.join(ROOT, "out/final.png")).convert("RGB")
 o = np.asarray(im.crop((AF_X, AF_Y, AF_X + CW, AF_Y + CH)), dtype=np.float32)[::S, ::S]
 our, _ = acutance_map(o)
 af = np.asarray(af_im, dtype=np.float32)[::S, ::S]
@@ -72,5 +75,5 @@ for k in order[:400]:
 
 # heat map of the ratio, stretched for visibility
 hm = np.clip(ratio * 128, 0, 255).astype(np.uint8)
-Image.fromarray(hm).resize((CW // S, CH // S)).save(r"B:\FocusMerge\out\softmap.png")
+Image.fromarray(hm).resize((CW // S, CH // S)).save(os.path.join(ROOT, "out/softmap.png"))
 print("\nwrote out/softmap.png (dark = soft relative to what is achievable)")

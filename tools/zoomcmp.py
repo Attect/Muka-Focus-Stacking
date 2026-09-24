@@ -5,6 +5,9 @@ import sys
 import numpy as np
 from PIL import Image, ImageDraw
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 AF_X, AF_Y = 1288, 488
@@ -17,8 +20,8 @@ frames = [int(t) for t in sys.argv[5].split(",")]
 
 SOURCES = [
     ("AF export", None),
-    ("OURS cur", "B:/FocusMerge/out/cur.png"),
-    ("OURS rev", "B:/FocusMerge/out/rev.png"),
+    ("OURS cur", os.path.join(ROOT, "out/cur.png")),
+    ("OURS rev", os.path.join(ROOT, "out/rev.png")),
 ]
 # Optional argv[6]: comma separated "label=path" entries replacing SOURCES.
 # The literal label @AF stands for the reference export.
@@ -61,6 +64,6 @@ dr = ImageDraw.Draw(out)
 for k, lab in enumerate(labels):
     cy, cx = divmod(k, cols)
     dr.text((cx * cell + 6, cy * (cell + 26) + 8), lab, fill=(0, 0, 0))
-p = r"B:\FocusMerge\out\zoom_%d_%d.png" % (x, y)
+p = os.path.join(ROOT, "out/zoom_%d_%d.png") % (x, y)
 out.save(p)
 print("wrote", p, labels)

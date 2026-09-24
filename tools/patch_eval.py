@@ -10,6 +10,9 @@ import sys
 import numpy as np
 from PIL import Image, ImageFilter
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 D = os.environ.get("STACK_DIR", "stack")
@@ -43,9 +46,9 @@ def best_raw(x, y, s):
 
 VARIANTS = sys.argv[1:] or [
     ("AF export", None),
-    ("hard pick", r"B:\FocusMerge\out\hard.png"),
-    ("fix2 (bracket d15)", r"B:\FocusMerge\out\fix2.png"),
-    ("pyramid", r"B:\FocusMerge\out\pyr.png"),
+    ("hard pick", os.path.join(ROOT, "out/hard.png")),
+    ("fix2 (bracket d15)", os.path.join(ROOT, "out/fix2.png")),
+    ("pyramid", os.path.join(ROOT, "out/pyr.png")),
 ]
 
 af = np.asarray(Image.open(os.path.join(D, "AF导出.png")).convert("RGB"), dtype=np.float32)

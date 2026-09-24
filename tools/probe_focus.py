@@ -10,6 +10,9 @@ import os
 import numpy as np
 from PIL import Image
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 AF_X, AF_Y = 1288, 488
@@ -20,9 +23,9 @@ RADIUS = 8
 files = sorted(f for f in os.listdir(D) if f.upper().startswith("DSC") and f.upper().endswith(".JPG"))
 n = len(files)
 
-depth_raw = np.asarray(Image.open(r"B:\FocusMerge\out\depth.png"), dtype=np.float32) / 65535.0 * (n - 1)
-depth_fin = np.asarray(Image.open(r"B:\FocusMerge\out\depth_final.png"), dtype=np.float32) / 65535.0 * (n - 1)
-conf = np.asarray(Image.open(r"B:\FocusMerge\out\conf.png"), dtype=np.float32)
+depth_raw = np.asarray(Image.open(os.path.join(ROOT, "out/depth.png")), dtype=np.float32) / 65535.0 * (n - 1)
+depth_fin = np.asarray(Image.open(os.path.join(ROOT, "out/depth_final.png")), dtype=np.float32) / 65535.0 * (n - 1)
+conf = np.asarray(Image.open(os.path.join(ROOT, "out/conf.png")), dtype=np.float32)
 
 # problem patches in reference-crop coordinates (block origin, size)
 PATCHES = [

@@ -14,6 +14,9 @@ import sys
 import numpy as np
 from PIL import Image
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 AF_X, AF_Y, CV_X, CV_Y = 1288, 488, 20, 13
@@ -29,9 +32,9 @@ if not POINTS:
     POINTS = [("knee-edge", 1639, 1245)]
 HALF = 20  # patch half size, reference pixels
 
-depth_path = r"B:\FocusMerge\out\depth_fix3.png"
+depth_path = os.path.join(ROOT, "out/depth_fix3.png")
 dw, dh = Image.open(depth_path).size
-out_w, out_h = Image.open(r"B:\FocusMerge\out\cur.png").size
+out_w, out_h = Image.open(os.path.join(ROOT, "out/cur.png")).size
 print("depth map %dx%d   output %dx%d   canvas would be %dx%d"
       % (dw, dh, out_w, out_h, 7008 // 2, 4672 // 2))
 # The depth map covers the output rect at analysis resolution.

@@ -8,6 +8,9 @@ import os
 import numpy as np
 from PIL import Image, ImageDraw
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 AF_X, AF_Y = 1288, 488
@@ -23,7 +26,7 @@ REGIONS = [
 ]
 
 af_im = Image.open(os.path.join(D, "AF导出.png")).convert("RGB")
-ours_im = Image.open(r"B:\FocusMerge\out\fix1.png").convert("RGB")
+ours_im = Image.open(os.path.join(ROOT, "out/fix1.png")).convert("RGB")
 af = np.asarray(af_im, dtype=np.float32)
 ours = np.asarray(ours_im, dtype=np.float32)
 oc = ours[AF_Y:AF_Y + af.shape[0], AF_X:AF_X + af.shape[1]]
@@ -72,5 +75,5 @@ yy = 0
 for r, m in zip(rows, meta):
     dr.text((8, yy + r.shape[0] + 10), m, fill=(0, 0, 0))
     yy += r.shape[0] + 34
-out.save(r"B:\FocusMerge\out\threeway.png")
+out.save(os.path.join(ROOT, "out/threeway.png"))
 print("\nwrote out/threeway.png")

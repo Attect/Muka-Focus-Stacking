@@ -90,7 +90,7 @@ def main():
         "<title>FocusMerge 效果检查</title><style>%s</style></head><body>"
         "<h1>FocusMerge 效果检查表</h1>"
         '<p class="lead">全部文件也直接放在这个文件夹里：'
-        "<code>B:\\FocusMerge\\out\\检查_2026-09-22\\</code></p>%s"
+        "<code>out/检查_2026-09-22/</code></p>%s"
         "<section><h2>还可用的设置</h2><ul>"
         "<li><code>--band-energy-gate 0.6</code>：更干净（塑料面颗粒 1.46，带内 7.95）</li>"
         "<li><code>--band-energy-gate 0.7</code>：当前默认（1.54 / 8.15）</li>"

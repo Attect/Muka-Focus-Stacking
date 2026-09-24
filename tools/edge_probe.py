@@ -19,6 +19,9 @@ import sys
 import numpy as np
 from PIL import Image, ImageDraw
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 AF_X, AF_Y, CV_X, CV_Y, S = 1288, 488, 20, 13, 2
@@ -29,7 +32,7 @@ N = len(files)
 cx, cy = int(sys.argv[1]), int(sys.argv[2])
 half = int(sys.argv[3]) if len(sys.argv) > 3 else 24
 zoom = int(sys.argv[4]) if len(sys.argv) > 4 else 4
-depth_path = sys.argv[5] if len(sys.argv) > 5 else r"B:\FocusMerge\out\depth_cur_final.png"
+depth_path = sys.argv[5] if len(sys.argv) > 5 else os.path.join(ROOT, "out/depth_cur_final.png")
 raw_path = depth_path.replace("_final", "")
 
 cvx, cvy = AF_X + cx + CV_X, AF_Y + cy + CV_Y
@@ -118,7 +121,7 @@ show = list(dict.fromkeys(show))
 tiles2 = [tiles[i] for i in show]
 labels = ["acut %.1f sml %.2f f%d" % (ac[i], sm[i], i) for i in show]
 for name, path, off in [("AF export", os.path.join(D, "AF导出.png"), False),
-                        ("OURS cur", r"B:\FocusMerge\out\cur.png", True)]:
+                        ("OURS cur", os.path.join(ROOT, "out/cur.png"), True)]:
     if not os.path.exists(path):
         continue
     a = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32)
@@ -141,7 +144,7 @@ dr = ImageDraw.Draw(out)
 for k, lab in enumerate(labels):
     ry, rx = divmod(k, cols)
     dr.text((rx * cell + 6, ry * (cell + 26) + 8), lab, fill=(0, 0, 0))
-p = r"B:\FocusMerge\out\edge_%d_%d.png" % (cx, cy)
+p = os.path.join(ROOT, "out/edge_%d_%d.png") % (cx, cy)
 out.save(p)
 print("wrote", p)
 print("tiles:", labels)

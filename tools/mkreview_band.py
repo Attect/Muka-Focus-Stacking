@@ -106,7 +106,7 @@ def main():
         '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">'
         "<title>光带（轮廓外亮带）修复与检查</title><style>%s</style></head><body>"
         "<h1>轮廓外的亮带：根因与修复</h1>"
-        '<p class="lead">全部文件也在 <code>B:\\FocusMerge\\out\\检查_亮带\\</code>。'
+        '<p class="lead">全部文件也在 <code>out/检查_亮带/</code>。'
         "结论：带内亮度从 <b>+2.81 级</b>（旧默认）降到 <b>+0.93 级</b>，"
         "这个指标的固有底噪是 +0.86，等于已经贴到地板；同一带的纹理比反而从 0.865 升到 0.933，"
         "gradE 略升。做法：只让金字塔最粗的 4 层用“窄候选窗口”，细节层保留宽窗口。</p>"

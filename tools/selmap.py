@@ -9,6 +9,9 @@ import sys
 import numpy as np
 from PIL import Image, ImageDraw
 
+# The project directory, so the paths below work on any machine.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 Image.MAX_IMAGE_PIXELS = None
 D = os.environ.get("STACK_DIR", "stack")
 AF_X, AF_Y, CV_X, CV_Y, S = 1288, 488, 20, 13, 2
@@ -24,7 +27,7 @@ ax, ay = (AF_X + x0 + CV_X) // S, (AF_Y + y0 + CV_Y) // S
 h = size // S
 sel = dep[ay:ay + h, ax:ax + h]
 
-ours = np.asarray(Image.open(r"B:\FocusMerge\out\final.png")
+ours = np.asarray(Image.open(os.path.join(ROOT, "out/final.png"))
                   .crop((AF_X + x0, AF_Y + y0, AF_X + x0 + size, AF_Y + y0 + size)), dtype=np.float32)
 ours_sel = dep[ay:ay + h, ax:ax + h]
 # nearest-neighbour upsample so each depth sample maps to a 2x2 image block
@@ -55,7 +58,7 @@ for k, (lab, im) in enumerate([
         ("AF export", big(np.asarray(af, dtype=np.float32)))]):
     dr.text((k * (cell + 18) + 6, 8), lab, fill=(0, 0, 0))
     sheet.paste(im, (k * (cell + 18), 30))
-p = r"B:\FocusMerge\out\selmap_%d_%d.png" % (cx, cy)
+p = os.path.join(ROOT, "out/selmap_%d_%d.png") % (cx, cy)
 sheet.save(p)
 print("wrote", p, " selected-frame stats: min %.1f median %.1f max %.1f"
       % (sel.min(), np.median(sel), sel.max()))
