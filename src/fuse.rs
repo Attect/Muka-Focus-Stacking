@@ -593,14 +593,21 @@ fn sep_extreme(src: &[f32], w: usize, h: usize, r: usize, want_min: bool) -> Vec
 /// a nearer surface can spill onto. Two things follow from that.
 ///
 /// * The pixels to correct are the ones within `radius` of a place where the
-///   depth field jumps by more than a few frames.
-/// * The colour to use instead comes from the **same depth slice**, sampled well
-///   away from any jump, so it is the colour of the background itself at that
-///   distance and not a mixture of background and object.
+///   depth field jumps by more than a few frames, and that stand on the far side.
+/// * The colour to use instead is the colour of the **surface behind** — its own
+///   far-side region, sampled clear of the silhouette, which is where the wash is
+///   thinnest.
 ///
-/// Only the low-frequency colour is changed: the correction is a per-slice colour
-/// offset applied to a block average, so texture and detail come through
-/// untouched. `radius == 0` disables it.
+/// The far side has to be taken as a *surface*, not as a set of cells. "Nothing
+/// deeper lies within `radius`" also holds for a patch of the figure whose depth
+/// reads like the background, which on the reference stack is common enough to
+/// matter; and the surface's own colour is what makes such a patch harmless, since
+/// a small island can only be repainted with its own colour. See the comment on
+/// the grouping below.
+///
+/// Only the low-frequency colour is changed: the correction is a colour offset
+/// applied to a block average, so texture and detail come through untouched.
+/// `radius == 0` disables it.
 pub fn suppress_depth_spill(
     d: &mut [f32],
     w: usize,
@@ -684,63 +691,178 @@ pub fn suppress_depth_spill(
         });
     }
 
-    // ---- reference colour: the surface behind, sampled clear of the figure ---
-    //
-    // A pixel standing on the surface behind should be coloured like that surface.
-    // The candidates are the pixels that are *both* clear of the silhouette - the
-    // wash hugs it, so they are the contaminated ones - and on its far side, since
-    // the near side is the figure itself. Averaging them over a window several
-    // times the correction radius gives the surface's own colour.
-    //
-    // An earlier attempt took the replacement from "the same depth slice" instead.
-    // That fails, because the wash is *on* the surface behind: the replacement and
-    // the thing it replaces are in the same slice, so excluding the wash leaves
-    // nothing to sample from and including it pulls the answer back towards the
-    // wash. Distance from the silhouette is the discriminator that works.
-    let dmax = sep_extreme(&dep, sw, sh, rw, false);
-    let mut mask = Plane::new(sw, sh);
-    mask.d.par_iter_mut().enumerate().for_each(|(i, v)| {
-        *v = if dist[i] > cap as f32 && dmax[i] - dep[i] < STEP {
-            1.0
-        } else {
-            0.0
-        };
-    });
     let rwm = rw * 4;
-    let wsum = box_blur(&mask, rwm);
-    let mut refc = vec![0.0f32; n4 * 3];
-    for ch in 0..3 {
-        let mut p = Plane::new(sw, sh);
-        p.d.par_iter_mut().enumerate().for_each(|(i, v)| {
-            *v = col[i * 3 + ch] * mask.d[i];
-        });
-        let sums = box_blur(&p, rwm);
-        refc.par_chunks_mut(3).enumerate().for_each(|(i, px)| {
-            px[ch] = sums.d[i] / wsum.d[i].max(1e-3);
-        });
+    let dmax = sep_extreme(&dep, sw, sh, rw, false);
+
+    // ---- the surface behind, as surfaces rather than cells -------------------
+    //
+    // "Nothing deeper lies within `rw`" is true of the background, but it is *also*
+    // true of a patch of the figure whose depth happens to read like the background.
+    // On the reference stack that is not rare: the hair lock, the hat and the leaf
+    // edges carry almost no focus signal, their depth is noise, and noise lands on
+    // the wall's own value often enough to leave 524 separate patches, several
+    // hundred cells each. Those patches were then repainted with the wall's colour,
+    // which is what printed grey blotches over the yellow hair.
+    //
+    // Local tests cannot tell the two apart -- the patch's depth really does equal
+    // the wall's, and it really does have a much nearer surface alongside it. What
+    // separates them is extent: the wall is one huge, 8-connected region of nearly
+    // constant depth, the patch is a small island fenced in by much nearer cells.
+    // So group the far-side cells into surfaces and require three things: the
+    // surface has to be big, its colour has to be sampled from itself (a small
+    // island can then only be repainted with its own colour, and the correction
+    // cancels), and the cell's depth has to agree with the surface's.
+    const TOL: f32 = STEP * 0.5; // depth spread that still counts as one surface
+    const DCON: f32 = STEP * 0.5; // how far a cell may sit from the surface's depth
+    // A surface smaller than this cannot supply a sample from outside the
+    // reference window, so averaging over it would just blur the cell into itself.
+    let min_comp = 4 * (2 * rwm + 1) * (2 * rwm + 1);
+
+    let mut lab = vec![-1i32; n4];
+    // bbox (x0, y0, x1, y1) and cell count, per surface.
+    let mut comps: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
+    let mut queue: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+    for sy in 0..sh {
+        for sx in 0..sw {
+            let i = sy * sw + sx;
+            if dmax[i] - dep[i] >= STEP || lab[i] >= 0 {
+                continue; // on the near side of a step, or already claimed
+            }
+            let seed = dep[i];
+            let id = comps.len() as i32;
+            lab[i] = id;
+            queue.clear();
+            queue.push_back(i as u32);
+            let (mut x0, mut y0, mut x1, mut y1, mut cnt) = (sx, sy, sx, sy, 0usize);
+            while let Some(q) = queue.pop_front() {
+                let (y, x) = (q as usize / sw, q as usize % sw);
+                cnt += 1;
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        let (ny, nx) = (y as i32 + dy, x as i32 + dx);
+                        if ny < 0 || nx < 0 || ny >= sh as i32 || nx >= sw as i32 {
+                            continue;
+                        }
+                        let j = ny as usize * sw + nx as usize;
+                        if lab[j] < 0 && dmax[j] - dep[j] < STEP && (dep[j] - seed).abs() <= TOL
+                        {
+                            lab[j] = id;
+                            queue.push_back(j as u32);
+                        }
+                    }
+                }
+            }
+            comps.push((x0, y0, x1, y1, cnt));
+        }
     }
 
-    // ---- apply the offset, leaving the detail in place ---------------------
-    let mut off = vec![0.0f32; n4 * 3];
-    let mut alpha = vec![0.0f32; n4];
+    // Only the surfaces that actually reach the correction zone are worth the work.
+    let mut needs = vec![false; comps.len()];
     for i in 0..n4 {
-        if dmax[i] - dep[i] >= STEP {
-            continue; // this pixel is on the figure, not on the surface behind
-        }
-        // How much of the window held a usable reference. A hard test here would
-        // throw away the pixels nearest the silhouette - exactly the ones that
-        // need the correction - because the sample count is naturally lowest
-        // there; a soft ramp keeps them, at a weight that says how much to trust.
-        let rel = (wsum.d[i] / TRUST).clamp(0.0, 1.0);
-        let a = (1.0 - dist[i] / (cap as f32 + 1.0)).clamp(0.0, 1.0) * rel;
-        if a <= 0.0 {
-            continue;
-        }
-        alpha[i] = a;
-        for ch in 0..3 {
-            off[i * 3 + ch] = (refc[i * 3 + ch] - col[i * 3 + ch]) * a;
+        if lab[i] >= 0 && dist[i] <= cap as f32 {
+            needs[lab[i] as usize] = true;
         }
     }
+
+    let mut off = vec![0.0f32; n4 * 3];
+    for (id, &(x0, y0, x1, y1, cnt)) in comps.iter().enumerate() {
+        if !needs[id] || cnt < min_comp {
+            continue;
+        }
+        // Everything the window touches, with a margin, so the blur inside the
+        // surface's own bounding box sees the whole window. Edge clamping at a crop
+        // border is only ever used inside that margin, which is discarded.
+        let (cx0, cy0) = (x0.saturating_sub(rwm), y0.saturating_sub(rwm));
+        let (cx1, cy1) = ((x1 + rwm + 1).min(sw), (y1 + rwm + 1).min(sh));
+        let (cw, chh) = (cx1 - cx0, cy1 - cy0);
+        let mut own = vec![0.0f32; cw * chh];
+        for y in cy0..cy1 {
+            for x in cx0..cx1 {
+                if lab[y * sw + x] == id as i32 {
+                    own[(y - cy0) * cw + (x - cx0)] = 1.0;
+                }
+            }
+        }
+        let wsum = box_blur(&Plane { w: cw, h: chh, d: own.clone() }, rwm);
+        let mut dp = vec![0.0f32; cw * chh];
+        for y in cy0..cy1 {
+            for x in cx0..cx1 {
+                let k = (y - cy0) * cw + (x - cx0);
+                dp[k] = dep[y * sw + x] * own[k];
+            }
+        }
+        let dsum = box_blur(&Plane { w: cw, h: chh, d: dp }, rwm);
+        let mut dref = vec![0.0f32; cw * chh];
+        for k in 0..cw * chh {
+            dref[k] = dsum.d[k] / wsum.d[k].max(1e-3);
+        }
+        let mut refc = vec![0.0f32; cw * chh * 3];
+        for ch in 0..3 {
+            let mut p = vec![0.0f32; cw * chh];
+            for y in cy0..cy1 {
+                for x in cx0..cx1 {
+                    let k = (y - cy0) * cw + (x - cx0);
+                    p[k] = col[(y * sw + x) * 3 + ch] * own[k];
+                }
+            }
+            let sums = box_blur(&Plane { w: cw, h: chh, d: p }, rwm);
+            for k in 0..cw * chh {
+                refc[k * 3 + ch] = sums.d[k] / wsum.d[k].max(1e-3);
+            }
+        }
+
+        for y in cy0..cy1 {
+            for x in cx0..cx1 {
+                let i = y * sw + x;
+                if lab[i] != id as i32 || dist[i] > cap as f32 {
+                    continue;
+                }
+                let k = (y - cy0) * cw + (x - cx0);
+                if (dep[i] - dref[k]).abs() >= DCON {
+                    continue; // reads as a different surface
+                }
+                // How much of the window held a usable reference. A hard test here
+                // would throw away the pixels nearest the silhouette - exactly the
+                // ones that need the correction - because the sample count is
+                // naturally lowest there; a soft ramp keeps them, at a weight that
+                // says how much to trust.
+                let rel = (wsum.d[k] / TRUST).clamp(0.0, 1.0);
+                let a = (1.0 - dist[i] / (cap as f32 + 1.0)).clamp(0.0, 1.0) * rel;
+                if a <= 0.0 {
+                    continue;
+                }
+                for ch in 0..3 {
+                    off[i * 3 + ch] = (refc[k * 3 + ch] - col[i * 3 + ch]) * a;
+                }
+            }
+        }
+    }
+    // Opt-in diagnostics: a pass that silently corrects nothing is the failure
+    // mode that is hardest to notice, because its output is a valid image.
+    if std::env::var_os("MUKASTACK_SPILL_DEBUG").is_some() {
+        let touched = (0..n4)
+            .filter(|&i| off[i * 3] != 0.0 || off[i * 3 + 1] != 0.0 || off[i * 3 + 2] != 0.0)
+            .count();
+        let large = comps.iter().filter(|c| c.4 >= min_comp).count();
+        let near = (0..n4).filter(|&i| dist[i] <= cap as f32).count();
+        eprintln!(
+            "spill: {} surfaces, {} reach the correction zone, {} big enough (>= {} cells), \
+             {} cells corrected of {}; {} cells within cap of a silhouette, {} of them far-side",
+            comps.len(),
+            needs.iter().filter(|&&n| n).count(),
+            large,
+            min_comp,
+            touched,
+            n4,
+            near,
+            (0..n4).filter(|&i| dist[i] <= cap as f32 && lab[i] >= 0).count()
+        );
+    }
+
     // Bilinear, *not* nearest. The correction lives on a 1/S grid; replicating
     // those cells prints a 1/S-pixel checkerboard of colour steps over everything
     // it touches, which shows up as a large rise in gradient energy on a flat
